@@ -19,6 +19,7 @@ from itertools import chain
 from pathlib import PurePath
 from collections import OrderedDict
 from .mesonlib import (
+    HoldableObject,
     MesonException, EnvironmentException, MachineChoice, PerMachine,
     PerMachineDefaultable, default_libdir, default_libexecdir,
     default_prefix, split_args, OptionKey, OptionType, stringlistify,
@@ -42,8 +43,8 @@ if T.TYPE_CHECKING:
     KeyedOptionDictType = T.Union[T.Dict['OptionKey', 'UserOption[T.Any]'], OptionOverrideProxy]
     CompilerCheckCacheKey = T.Tuple[T.Tuple[str, ...], str, str, T.Tuple[str, ...], str]
 
-version = '0.58.999'
-backendlist = ['ninja', 'vs', 'vs2010', 'vs2015', 'vs2017', 'vs2019', 'xcode']
+version = '0.59.0.rc2'
+backendlist = ['ninja', 'vs', 'vs2010', 'vs2012', 'vs2013', 'vs2015', 'vs2017', 'vs2019', 'xcode']
 
 default_yielding = False
 
@@ -54,14 +55,13 @@ _T = T.TypeVar('_T')
 class MesonVersionMismatchException(MesonException):
     '''Build directory generated with Meson version is incompatible with current version'''
     def __init__(self, old_version: str, current_version: str) -> None:
-        super().__init__('Build directory has been generated with Meson version {}, '
-                         'which is incompatible with the current version {}.'
-                         .format(old_version, current_version))
+        super().__init__(f'Build directory has been generated with Meson version {old_version}, '
+                         f'which is incompatible with the current version {current_version}.')
         self.old_version = old_version
         self.current_version = current_version
 
 
-class UserOption(T.Generic[_T]):
+class UserOption(T.Generic[_T], HoldableObject):
     def __init__(self, description: str, choices: T.Optional[T.Union[str, T.List[_T]]], yielding: T.Optional[bool]):
         super().__init__()
         self.choices = choices
@@ -236,7 +236,7 @@ class UserArrayOption(UserOption[T.List[str]]):
             mlog.deprecation(msg)
         for i in newvalue:
             if not isinstance(i, str):
-                raise MesonException('String array element "{}" is not a string.'.format(str(newvalue)))
+                raise MesonException(f'String array element "{newvalue!s}" is not a string.')
         if self.choices:
             bad = [x for x in newvalue if x not in self.choices]
             if bad:
@@ -255,6 +255,7 @@ class UserFeatureOption(UserComboOption):
 
     def __init__(self, description: str, value: T.Any, yielding: T.Optional[bool] = None):
         super().__init__(description, self.static_choices, value, yielding)
+        self.name: T.Optional[str] = None  # TODO: Refactor options to all store their name
 
     def is_enabled(self) -> bool:
         return self.value == 'enabled'
@@ -479,8 +480,8 @@ class CoreData:
                     # the contents of that file into the meson private (scratch)
                     # directory so that it can be re-read when wiping/reconfiguring
                     copy = os.path.join(scratch_dir, f'{uuid.uuid4()}.{ftype}.ini')
-                    with open(f) as rf:
-                        with open(copy, 'w') as wf:
+                    with open(f, encoding='utf-8') as rf:
+                        with open(copy, 'w', encoding='utf-8') as wf:
                             wf.write(rf.read())
                     real.append(copy)
 
@@ -519,8 +520,7 @@ class CoreData:
     def sanitize_prefix(self, prefix):
         prefix = os.path.expanduser(prefix)
         if not os.path.isabs(prefix):
-            raise MesonException('prefix value {!r} must be an absolute path'
-                                 ''.format(prefix))
+            raise MesonException(f'prefix value {prefix!r} must be an absolute path')
         if prefix.endswith('/') or prefix.endswith('\\'):
             # On Windows we need to preserve the trailing slash if the
             # string is of type 'C:\' because 'C:' is not an absolute path.
@@ -902,7 +902,7 @@ class MachineFileParser():
             except MesonException:
                 raise EnvironmentException(f'Malformed value in machine file variable {entry!r}.')
             except KeyError as e:
-                raise EnvironmentException('Undefined constant {!r} in machine file variable {!r}.'.format(e.args[0], entry))
+                raise EnvironmentException(f'Undefined constant {e.args[0]!r} in machine file variable {entry!r}.')
             section[entry] = res
             self.scope[entry] = res
         return section
@@ -971,7 +971,7 @@ def write_cmd_line_file(build_dir: str, options: argparse.Namespace) -> None:
 
     config['options'] = {str(k): str(v) for k, v in options.cmd_line_options.items()}
     config['properties'] = properties
-    with open(filename, 'w') as f:
+    with open(filename, 'w', encoding='utf-8') as f:
         config.write(f)
 
 def update_cmd_line_file(build_dir: str, options: argparse.Namespace):
@@ -979,7 +979,7 @@ def update_cmd_line_file(build_dir: str, options: argparse.Namespace):
     config = CmdLineFileParser()
     config.read(filename)
     config['options'].update({str(k): str(v) for k, v in options.cmd_line_options.items()})
-    with open(filename, 'w') as f:
+    with open(filename, 'w', encoding='utf-8') as f:
         config.write(f)
 
 def get_cmd_line_options(build_dir: str, options: argparse.Namespace) -> str:
@@ -1005,9 +1005,9 @@ def load(build_dir: str) -> CoreData:
         raise MesonException(load_fail_msg)
     except (ModuleNotFoundError, AttributeError):
         raise MesonException(
-            "Coredata file {!r} references functions or classes that don't "
+            f"Coredata file {filename!r} references functions or classes that don't "
             "exist. This probably means that it was generated with an old "
-            "version of meson.".format(filename))
+            "version of meson.")
     if not isinstance(obj, CoreData):
         raise MesonException(load_fail_msg)
     if major_versions_differ(obj.version, version):
@@ -1068,7 +1068,7 @@ def parse_cmd_line_options(args: argparse.Namespace) -> None:
             if key in args.cmd_line_options:
                 cmdline_name = BuiltinOption.argparse_name_to_arg(name)
                 raise MesonException(
-                    'Got argument {0} as both -D{0} and {1}. Pick one.'.format(name, cmdline_name))
+                    f'Got argument {name} as both -D{name} and {cmdline_name}. Pick one.')
             args.cmd_line_options[key] = value
             delattr(args, name)
 

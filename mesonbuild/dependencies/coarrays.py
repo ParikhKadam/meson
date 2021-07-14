@@ -15,7 +15,7 @@
 import functools
 import typing as T
 
-from .base import DependencyMethods, ExternalDependency, detect_compiler
+from .base import DependencyMethods, detect_compiler, SystemDependency
 from .cmake import CMakeDependency
 from .pkgconfig import PkgConfigDependency
 from .factory import factory_methods
@@ -52,7 +52,7 @@ def coarray_factory(env: 'Environment',
     return candidates
 
 
-class CoarrayDependency(ExternalDependency):
+class CoarrayDependency(SystemDependency):
     """
     Coarrays are a Fortran 2008 feature.
 

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .base import ExternalDependency, DependencyException, DependencyMethods
+from .base import ExternalDependency, DependencyException, DependencyMethods, DependencyTypeName
 from ..mesonlib import listify, Popen_safe, split_args, version_compare, version_compare_many
 from ..programs import find_external_program
 from .. import mlog
@@ -41,7 +41,7 @@ class ConfigToolDependency(ExternalDependency):
     __strip_version = re.compile(r'^[0-9][0-9.]+')
 
     def __init__(self, name: str, environment: 'Environment', kwargs: T.Dict[str, T.Any], language: T.Optional[str] = None):
-        super().__init__('config-tool', environment, kwargs, language=language)
+        super().__init__(DependencyTypeName('config-tool'), environment, kwargs, language=language)
         self.name = name
         # You may want to overwrite the class version in some cases
         self.tools = listify(kwargs.get('tools', self.tools))
@@ -134,9 +134,7 @@ class ConfigToolDependency(ExternalDependency):
         p, out, err = Popen_safe(self.config + args)
         if p.returncode != 0:
             if self.required:
-                raise DependencyException(
-                    'Could not generate {} for {}.\n{}'.format(
-                        stage, self.name, err))
+                raise DependencyException(f'Could not generate {stage} for {self.name}.\n{err}')
             return []
         return split_args(out)
 

@@ -23,15 +23,15 @@ import shutil
 import typing as T
 
 from .. import mesonlib, mlog
-from ..mesonlib import version_compare, stringlistify, extract_as_list, MachineChoice
+from ..compilers import AppleClangCCompiler, AppleClangCPPCompiler, detect_compiler_for
 from ..environment import get_llvm_tool_names
-from .base import DependencyException, DependencyMethods, ExternalDependency, strip_system_libdirs
+from ..mesonlib import version_compare, stringlistify, extract_as_list, MachineChoice
+from .base import DependencyException, DependencyMethods, strip_system_libdirs, SystemDependency
 from .cmake import CMakeDependency
 from .configtool import ConfigToolDependency
-from .pkgconfig import PkgConfigDependency
 from .factory import DependencyFactory
 from .misc import threads_factory
-from ..compilers import AppleClangCCompiler, AppleClangCPPCompiler
+from .pkgconfig import PkgConfigDependency
 
 if T.TYPE_CHECKING:
     from ..envconfig import MachineInfo
@@ -50,7 +50,7 @@ def get_shared_library_suffix(environment: 'Environment', for_machine: MachineCh
     return '.so'
 
 
-class GTestDependencySystem(ExternalDependency):
+class GTestDependencySystem(SystemDependency):
     def __init__(self, name: str, environment: 'Environment', kwargs: T.Dict[str, T.Any]) -> None:
         super().__init__(name, environment, kwargs, language='cpp')
         self.main = kwargs.get('main', False)
@@ -120,7 +120,7 @@ class GTestDependencyPC(PkgConfigDependency):
         super().__init__(name, environment, kwargs)
 
 
-class GMockDependencySystem(ExternalDependency):
+class GMockDependencySystem(SystemDependency):
     def __init__(self, name: str, environment: 'Environment', kwargs: T.Dict[str, T.Any]) -> None:
         super().__init__(name, environment, kwargs, language='cpp')
         self.main = kwargs.get('main', False)
@@ -219,7 +219,7 @@ class LLVMDependencyConfigTool(ConfigToolDependency):
         # the C linker works fine if only using the C API.
         super().__init__(name, environment, kwargs, language='cpp')
         self.provided_modules: T.List[str] = []
-        self.required_modules: T.Set[str]  = set()
+        self.required_modules: mesonlib.OrderedSet[str]  = mesonlib.OrderedSet()
         self.module_details:   T.List[str] = []
         if not self.is_found:
             return
@@ -230,7 +230,7 @@ class LLVMDependencyConfigTool(ConfigToolDependency):
         opt_modules = stringlistify(extract_as_list(kwargs, 'optional_modules'))
         self.check_components(opt_modules, required=False)
 
-        cargs = set(self.get_config_value(['--cppflags'], 'compile_args'))
+        cargs = mesonlib.OrderedSet(self.get_config_value(['--cppflags'], 'compile_args'))
         self.compile_args = list(cargs.difference(self.__cpp_blacklist))
 
         if version_compare(self.version, '>= 3.9'):
@@ -464,7 +464,7 @@ class ValgrindDependency(PkgConfigDependency):
         return []
 
 
-class ZlibSystemDependency(ExternalDependency):
+class ZlibSystemDependency(SystemDependency):
 
     def __init__(self, name: str, environment: 'Environment', kwargs: T.Dict[str, T.Any]):
         super().__init__(name, environment, kwargs)
@@ -513,14 +513,14 @@ class ZlibSystemDependency(ExternalDependency):
         return [DependencyMethods.SYSTEM]
 
 
-class JDKSystemDependency(ExternalDependency):
+class JDKSystemDependency(SystemDependency):
     def __init__(self, environment: 'Environment', kwargs: T.Dict[str, T.Any]):
         super().__init__('jdk', environment, kwargs)
 
         m = self.env.machines[self.for_machine]
 
         if 'java' not in environment.coredata.compilers[self.for_machine]:
-            environment.detect_compiler_for('java', self.for_machine)
+            detect_compiler_for(environment, 'java', self.for_machine)
         self.javac = environment.coredata.compilers[self.for_machine]['java']
         self.version = self.javac.version
 

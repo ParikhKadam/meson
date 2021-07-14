@@ -22,7 +22,7 @@ from enum import Enum
 
 from .. import mlog
 from ..compilers import clib_langs
-from ..mesonlib import MachineChoice, MesonException
+from ..mesonlib import MachineChoice, MesonException, HoldableObject
 from ..mesonlib import version_compare_many
 from ..interpreterbase import FeatureDeprecated
 
@@ -42,6 +42,8 @@ class DependencyMethods(Enum):
     AUTO = 'auto'
     PKGCONFIG = 'pkg-config'
     CMAKE = 'cmake'
+    # The dependency is provided by the standard library and does not need to be linked
+    BUILTIN = 'builtin'
     # Just specify the standard link arguments, assuming the operating system provides the library.
     SYSTEM = 'system'
     # This is only supported on OSX - search the frameworks directory by name.
@@ -60,7 +62,10 @@ class DependencyMethods(Enum):
     DUB = 'dub'
 
 
-class Dependency:
+DependencyTypeName = T.NewType('DependencyTypeName', str)
+
+
+class Dependency(HoldableObject):
 
     @classmethod
     def _process_include_type_kw(cls, kwargs: T.Dict[str, T.Any]) -> str:
@@ -72,7 +77,7 @@ class Dependency:
             raise DependencyException("include_type may only be one of ['preserve', 'system', 'non-system']")
         return kwargs['include_type']
 
-    def __init__(self, type_name: str, kwargs: T.Dict[str, T.Any]) -> None:
+    def __init__(self, type_name: DependencyTypeName, kwargs: T.Dict[str, T.Any]) -> None:
         self.name = "null"
         self.version:  T.Optional[str] = None
         self.language: T.Optional[str] = None # None means C-like
@@ -220,7 +225,7 @@ class InternalDependency(Dependency):
                  link_args: T.List[str], libraries: T.List['BuildTarget'],
                  whole_libraries: T.List['BuildTarget'], sources: T.List['FileOrString'],
                  ext_deps: T.List[Dependency], variables: T.Dict[str, T.Any]):
-        super().__init__('internal', {})
+        super().__init__(DependencyTypeName('internal'), {})
         self.version = version
         self.is_found = True
         self.include_directories = incdirs
@@ -307,7 +312,7 @@ class HasNativeKwarg:
         return MachineChoice.BUILD if kwargs.get('native', False) else MachineChoice.HOST
 
 class ExternalDependency(Dependency, HasNativeKwarg):
-    def __init__(self, type_name: str, environment: 'Environment', kwargs: T.Dict[str, T.Any], language: T.Optional[str] = None):
+    def __init__(self, type_name: DependencyTypeName, environment: 'Environment', kwargs: T.Dict[str, T.Any], language: T.Optional[str] = None):
         Dependency.__init__(self, type_name, kwargs)
         self.env = environment
         self.name = type_name # default
@@ -368,8 +373,8 @@ class ExternalDependency(Dependency, HasNativeKwarg):
                 mlog.log(*found_msg)
 
                 if self.required:
-                    m = 'Unknown version of dependency {!r}, but need {!r}.'
-                    raise DependencyException(m.format(self.name, self.version_reqs))
+                    m = f'Unknown version of dependency {self.name!r}, but need {self.version_reqs!r}.'
+                    raise DependencyException(m)
 
             else:
                 (self.is_found, not_found, found) = \
@@ -392,7 +397,7 @@ class ExternalDependency(Dependency, HasNativeKwarg):
 
 class NotFoundDependency(Dependency):
     def __init__(self, environment: 'Environment') -> None:
-        super().__init__('not-found', {})
+        super().__init__(DependencyTypeName('not-found'), {})
         self.env = environment
         self.name = 'not-found'
         self.is_found = False
@@ -406,7 +411,7 @@ class NotFoundDependency(Dependency):
 class ExternalLibrary(ExternalDependency):
     def __init__(self, name: str, link_args: T.List[str], environment: 'Environment',
                  language: str, silent: bool = False) -> None:
-        super().__init__('library', environment, {}, language=language)
+        super().__init__(DependencyTypeName('library'), environment, {}, language=language)
         self.name = name
         self.language = language
         self.is_found = False
@@ -531,3 +536,37 @@ def detect_compiler(name: str, env: 'Environment', for_machine: MachineChoice,
             except KeyError:
                 continue
     return None
+
+
+class SystemDependency(ExternalDependency):
+
+    """Dependency base for System type dependencies."""
+
+    def __init__(self, name: str, env: 'Environment', kwargs: T.Dict[str, T.Any],
+                 language: T.Optional[str] = None) -> None:
+        super().__init__(DependencyTypeName('system'), env, kwargs, language=language)
+        self.name = name
+
+    @staticmethod
+    def get_methods() -> T.List[DependencyMethods]:
+        return [DependencyMethods.SYSTEM]
+
+    def log_tried(self) -> str:
+        return 'system'
+
+
+class BuiltinDependency(ExternalDependency):
+
+    """Dependency base for Builtin type dependencies."""
+
+    def __init__(self, name: str, env: 'Environment', kwargs: T.Dict[str, T.Any],
+                 language: T.Optional[str] = None) -> None:
+        super().__init__(DependencyTypeName('builtin'), env, kwargs, language=language)
+        self.name = name
+
+    @staticmethod
+    def get_methods() -> T.List[DependencyMethods]:
+        return [DependencyMethods.BUILTIN]
+
+    def log_tried(self) -> str:
+        return 'builtin'

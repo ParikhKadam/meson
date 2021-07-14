@@ -20,6 +20,7 @@ import subprocess
 from collections import OrderedDict
 from enum import Enum, unique
 import itertools
+from textwrap import dedent
 from pathlib import PurePath, Path
 from functools import lru_cache
 
@@ -40,7 +41,7 @@ from ..compilers import (
 from ..linkers import ArLinker, RSPFileSyntax
 from ..mesonlib import (
     File, LibType, MachineChoice, MesonException, OrderedSet, PerMachine,
-    ProgressBar, quote_arg, unholder,
+    ProgressBar, quote_arg
 )
 from ..mesonlib import get_compiler_for_source, has_path_sep, OptionKey
 from .backends import CleanTrees
@@ -462,10 +463,11 @@ class NinjaBackend(backends.Backend):
             return open(tempfilename, 'a', encoding='utf-8')
         filename = os.path.join(self.environment.get_scratch_dir(),
                                 'incdetect.c')
-        with open(filename, 'w') as f:
-            f.write('''#include<stdio.h>
-int dummy;
-''')
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write(dedent('''\
+                #include<stdio.h>
+                int dummy;
+            '''))
 
         # The output of cl dependency information is language
         # and locale dependent. Any attempt at converting it to
@@ -937,7 +939,7 @@ int dummy;
                 self.generate_target(t)
 
     def custom_target_generator_inputs(self, target):
-        for s in unholder(target.sources):
+        for s in target.sources:
             if isinstance(s, build.GeneratedList):
                 self.generate_genlist_for_target(s, target)
 
@@ -973,6 +975,7 @@ int dummy;
         cmd, reason = self.as_meson_exe_cmdline(target.name, target.command[0], cmd[1:],
                                                 extra_bdeps=target.get_transitive_build_target_deps(),
                                                 capture=ofilenames[0] if target.capture else None,
+                                                feed=srcs[0] if target.feed else None,
                                                 env=target.env)
         if reason:
             cmd_type = f' (wrapped by meson {reason})'
@@ -1215,7 +1218,7 @@ int dummy;
         manifest_path = os.path.join(self.get_target_private_dir(target), 'META-INF', 'MANIFEST.MF')
         manifest_fullpath = os.path.join(self.environment.get_build_dir(), manifest_path)
         os.makedirs(os.path.dirname(manifest_fullpath), exist_ok=True)
-        with open(manifest_fullpath, 'w') as manifest:
+        with open(manifest_fullpath, 'w', encoding='utf-8') as manifest:
             if any(target.link_targets):
                 manifest.write('Class-Path: ')
                 cp_paths = [os.path.join(self.get_target_dir(l), l.get_filename()) for l in target.link_targets]
@@ -3100,7 +3103,8 @@ https://gcc.gnu.org/bugzilla/show_bug.cgi?id=47485'''))
     def get_user_option_args(self):
         cmds = []
         for (k, v) in self.environment.coredata.options.items():
-            cmds.append('-D' + str(k) + '=' + (v.value if isinstance(v.value, str) else str(v.value).lower()))
+            if k.is_project():
+                cmds.append('-D' + str(k) + '=' + (v.value if isinstance(v.value, str) else str(v.value).lower()))
         # The order of these arguments must be the same between runs of Meson
         # to ensure reproducible output. The order we pass them shouldn't
         # affect behavior in any other way.

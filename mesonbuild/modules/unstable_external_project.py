@@ -16,18 +16,17 @@ import os, subprocess, shlex
 from pathlib import Path
 import typing as T
 
-from . import ExtensionModule, ModuleReturnValue, ModuleState, ModuleObject
+from . import ExtensionModule, ModuleReturnValue, ModuleState, NewExtensionModule
 from .. import mlog, build
 from ..mesonlib import (MesonException, Popen_safe, MachineChoice,
                        get_variable_regex, do_replacement, extract_as_list)
 from ..interpreterbase import InterpreterException, FeatureNew
 from ..interpreterbase import permittedKwargs, typed_pos_args
-from ..interpreter import DependencyHolder
 from ..compilers.compilers import CFLAGS_MAPPING, CEXE_MAPPING
 from ..dependencies import InternalDependency, PkgConfigDependency
 from ..mesonlib import OptionKey
 
-class ExternalProject(ModuleObject):
+class ExternalProject(NewExtensionModule):
     def __init__(self,
                  state: ModuleState,
                  configure_command: str,
@@ -163,7 +162,7 @@ class ExternalProject(ModuleObject):
         log_filename = Path(mlog.log_dir, f'{self.name}-{step}.log')
         output = None
         if not self.verbose:
-            output = open(log_filename, 'w')
+            output = open(log_filename, 'w', encoding='utf-8')
             output.write(m + '\n')
             output.flush()
         else:
@@ -237,7 +236,7 @@ class ExternalProject(ModuleObject):
         variables = []
         dep = InternalDependency(version, incdir, compile_args, link_args, libs,
                                  libs_whole, sources, final_deps, variables)
-        return DependencyHolder(dep, self.subproject)
+        return dep
 
 
 class ExternalProjectModule(ExtensionModule):

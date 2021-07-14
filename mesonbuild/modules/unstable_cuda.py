@@ -16,17 +16,16 @@ import typing as T
 import re
 
 from ..mesonlib import version_compare
-from ..interpreter import CompilerHolder
-from ..compilers import CudaCompiler
+from ..compilers import CudaCompiler, Compiler
 
-from . import ModuleObject
+from . import NewExtensionModule
 
 from ..interpreterbase import (
     flatten, permittedKwargs, noKwargs,
     InvalidArguments, FeatureNew
 )
 
-class CudaModule(ModuleObject):
+class CudaModule(NewExtensionModule):
 
     @FeatureNew('CUDA module', '0.50.0')
     def __init__(self, *args, **kwargs):
@@ -51,6 +50,7 @@ class CudaModule(ModuleObject):
 
         cuda_version = args[0]
         driver_version_table = [
+            {'cuda_version': '>=11.4.0',   'windows': '471.11', 'linux': '470.42.01'},
             {'cuda_version': '>=11.3.0',   'windows': '465.89', 'linux': '465.19.01'},
             {'cuda_version': '>=11.2.2',   'windows': '461.33', 'linux': '460.32.03'},
             {'cuda_version': '>=11.2.1',   'windows': '461.09', 'linux': '460.32.03'},
@@ -83,7 +83,7 @@ class CudaModule(ModuleObject):
 
     @permittedKwargs(['detected'])
     def nvcc_arch_flags(self, state: 'ModuleState',
-                              args: T.Tuple[T.Union[CompilerHolder, CudaCompiler, str]],
+                              args: T.Tuple[T.Union[Compiler, CudaCompiler, str]],
                               kwargs: T.Dict[str, T.Any]) -> T.List[str]:
         nvcc_arch_args = self._validate_nvcc_arch_args(args, kwargs)
         ret = self._nvcc_arch_flags(*nvcc_arch_args)[0]
@@ -91,7 +91,7 @@ class CudaModule(ModuleObject):
 
     @permittedKwargs(['detected'])
     def nvcc_arch_readable(self, state: 'ModuleState',
-                                 args: T.Tuple[T.Union[CompilerHolder, CudaCompiler, str]],
+                                 args: T.Tuple[T.Union[Compiler, CudaCompiler, str]],
                                  kwargs: T.Dict[str, T.Any]) -> T.List[str]:
         nvcc_arch_args = self._validate_nvcc_arch_args(args, kwargs)
         ret = self._nvcc_arch_flags(*nvcc_arch_args)[1]
@@ -105,16 +105,12 @@ class CudaModule(ModuleObject):
 
     @staticmethod
     def _detected_cc_from_compiler(c):
-        if isinstance(c, CompilerHolder):
-            c = c.compiler
         if isinstance(c, CudaCompiler):
             return c.detected_cc
         return ''
 
     @staticmethod
     def _version_from_compiler(c):
-        if isinstance(c, CompilerHolder):
-            c = c.compiler
         if isinstance(c, CudaCompiler):
             return c.version
         if isinstance(c, str):

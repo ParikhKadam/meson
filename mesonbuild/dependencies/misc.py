@@ -20,15 +20,15 @@ import re
 import sysconfig
 import typing as T
 
-from .. import mlog
 from .. import mesonlib
+from .. import mlog
 from ..environment import detect_cpu_family
-
-from .base import DependencyException, DependencyMethods, ExternalDependency
+from .base import DependencyException, DependencyMethods
+from .base import BuiltinDependency, SystemDependency
 from .cmake import CMakeDependency
 from .configtool import ConfigToolDependency
-from .pkgconfig import PkgConfigDependency
 from .factory import DependencyFactory, factory_methods
+from .pkgconfig import PkgConfigDependency
 
 if T.TYPE_CHECKING:
     from ..environment import Environment, MachineChoice
@@ -60,7 +60,7 @@ def netcdf_factory(env: 'Environment',
     return candidates
 
 
-class OpenMPDependency(ExternalDependency):
+class OpenMPDependency(SystemDependency):
     # Map date of specification release (which is the macro value) to a version.
     VERSIONS = {
         '201811': '5.0',
@@ -112,7 +112,7 @@ class OpenMPDependency(ExternalDependency):
                 mlog.log(mlog.yellow('WARNING:'), 'OpenMP found but omp.h missing.')
 
 
-class ThreadDependency(ExternalDependency):
+class ThreadDependency(SystemDependency):
     def __init__(self, name: str, environment: 'Environment', kwargs: T.Dict[str, T.Any]) -> None:
         super().__init__(name, environment, kwargs)
         self.is_found = True
@@ -130,7 +130,7 @@ class ThreadDependency(ExternalDependency):
         return [DependencyMethods.AUTO, DependencyMethods.CMAKE]
 
 
-class BlocksDependency(ExternalDependency):
+class BlocksDependency(SystemDependency):
     def __init__(self, environment: 'Environment', kwargs: T.Dict[str, T.Any]) -> None:
         super().__init__('blocks', environment, kwargs)
         self.name = 'blocks'
@@ -163,7 +163,7 @@ class BlocksDependency(ExternalDependency):
             self.is_found = True
 
 
-class Python3DependencySystem(ExternalDependency):
+class Python3DependencySystem(SystemDependency):
     def __init__(self, name: str, environment: 'Environment', kwargs: T.Dict[str, T.Any]) -> None:
         super().__init__(name, environment, kwargs)
 
@@ -188,8 +188,7 @@ class Python3DependencySystem(ExternalDependency):
             elif pycc.startswith(('i686', 'i386')):
                 return '32'
             else:
-                mlog.log('MinGW Python built with unknown CC {!r}, please file'
-                         'a bug'.format(pycc))
+                mlog.log(f'MinGW Python built with unknown CC {pycc!r}, please file a bug')
                 return None
         elif pyplat == 'win32':
             return '32'
@@ -379,7 +378,7 @@ class GpgmeDependencyConfigTool(ConfigToolDependency):
         return [DependencyMethods.PKGCONFIG, DependencyMethods.CONFIG_TOOL]
 
 
-class ShadercDependency(ExternalDependency):
+class ShadercDependency(SystemDependency):
 
     def __init__(self, environment: 'Environment', kwargs: T.Dict[str, T.Any]):
         super().__init__('shaderc', environment, kwargs)
@@ -399,8 +398,8 @@ class ShadercDependency(ExternalDependency):
                 self.is_found = True
 
                 if self.static and lib != static_lib:
-                    mlog.warning('Static library {!r} not found for dependency {!r}, may '
-                                 'not be statically linked'.format(static_lib, self.name))
+                    mlog.warning(f'Static library {static_lib!r} not found for dependency '
+                                 f'{self.name!r}, may not be statically linked')
 
                 break
 
@@ -428,7 +427,7 @@ class CursesConfigToolDependency(ConfigToolDependency):
         self.link_args = self.get_config_value(['--libs'], 'link_args')
 
 
-class CursesSystemDependency(ExternalDependency):
+class CursesSystemDependency(SystemDependency):
 
     """Curses dependency the hard way.
 
@@ -485,6 +484,25 @@ class CursesSystemDependency(ExternalDependency):
     @staticmethod
     def get_methods() -> T.List[DependencyMethods]:
         return [DependencyMethods.SYSTEM]
+
+
+class IntlBuiltinDependency(BuiltinDependency):
+    def __init__(self, name: str, env: 'Environment', kwargs: T.Dict[str, T.Any]):
+        super().__init__(name, env, kwargs)
+
+        if self.clib_compiler.has_function('ngettext', '', env)[0]:
+            self.is_found = True
+
+
+class IntlSystemDependency(SystemDependency):
+    def __init__(self, name: str, env: 'Environment', kwargs: T.Dict[str, T.Any]):
+        super().__init__(name, env, kwargs)
+
+        h = self.clib_compiler.has_header('libintl.h', '', env)
+        self.link_args =  self.clib_compiler.find_library('intl', env, [])
+
+        if h and self.link_args:
+            self.is_found = True
 
 
 @factory_methods({DependencyMethods.PKGCONFIG, DependencyMethods.CONFIG_TOOL, DependencyMethods.SYSTEM})
@@ -595,4 +613,11 @@ threads_factory = DependencyFactory(
     [DependencyMethods.SYSTEM, DependencyMethods.CMAKE],
     cmake_name='Threads',
     system_class=ThreadDependency,
+)
+
+intl_factory = DependencyFactory(
+    'intl',
+    [DependencyMethods.BUILTIN, DependencyMethods.SYSTEM],
+    builtin_class=IntlBuiltinDependency,
+    system_class=IntlSystemDependency,
 )

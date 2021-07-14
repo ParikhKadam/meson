@@ -29,10 +29,10 @@ from .. import dependencies
 from .. import programs
 from .. import mesonlib
 from .. import mlog
-from ..compilers import LANGUAGES_USING_LDFLAGS
+from ..compilers import LANGUAGES_USING_LDFLAGS, detect
 from ..mesonlib import (
     File, MachineChoice, MesonException, OptionType, OrderedSet, OptionOverrideProxy,
-    classify_unity_sources, unholder, OptionKey, join_args
+    classify_unity_sources, OptionKey, join_args
 )
 
 if T.TYPE_CHECKING:
@@ -41,9 +41,6 @@ if T.TYPE_CHECKING:
     from ..compilers import Compiler
     from ..interpreter import Interpreter, Test
     from ..mesonlib import FileMode
-
-    InstallType = T.List[T.Tuple[str, str, T.Optional['FileMode']]]
-    InstallSubdirsType = T.List[T.Tuple[str, str, T.Optional['FileMode'], T.Tuple[T.Set[str], T.Set[str]]]]
 
 # Languages that can mix with C or C++ but don't support unity builds yet
 # because the syntax we use for unity builds is specific to C/++/ObjC/++.
@@ -144,7 +141,7 @@ class SubdirInstallData(InstallDataBase):
 
 class ExecutableSerialisation:
     def __init__(self, cmd_args, env: T.Optional[build.EnvironmentVariables] = None, exe_wrapper=None,
-                 workdir=None, extra_paths=None, capture=None) -> None:
+                 workdir=None, extra_paths=None, capture=None, feed=None) -> None:
         self.cmd_args = cmd_args
         self.env = env
         if exe_wrapper is not None:
@@ -153,6 +150,7 @@ class ExecutableSerialisation:
         self.workdir = workdir
         self.extra_paths = extra_paths
         self.capture = capture
+        self.feed = feed
         self.pickled = False
         self.skip_if_destdir = False
         self.verbose = False
@@ -199,6 +197,12 @@ def get_backend_from_name(backend: str, build: T.Optional[build.Build] = None, i
     elif backend == 'vs2010':
         from . import vs2010backend
         return vs2010backend.Vs2010Backend(build, interpreter)
+    elif backend == 'vs2012':
+        from . import vs2012backend
+        return vs2012backend.Vs2012Backend(build, interpreter)
+    elif backend == 'vs2013':
+        from . import vs2013backend
+        return vs2013backend.Vs2013Backend(build, interpreter)
     elif backend == 'vs2015':
         from . import vs2015backend
         return vs2015backend.Vs2015Backend(build, interpreter)
@@ -237,7 +241,7 @@ class Backend:
     def generate(self) -> None:
         raise RuntimeError(f'generate is not implemented in {type(self).__name__}')
 
-    def get_target_filename(self, t, *, warn_multi_output: bool = True):
+    def get_target_filename(self, t: T.Union[build.Target, build.CustomTargetIndex], *, warn_multi_output: bool = True):
         if isinstance(t, build.CustomTarget):
             if warn_multi_output and len(t.get_outputs()) != 1:
                 mlog.warning(f'custom_target {t.name!r} has more than one output! '
@@ -250,7 +254,7 @@ class Backend:
             filename = t.get_filename()
         return os.path.join(self.get_target_dir(t), filename)
 
-    def get_target_filename_abs(self, target):
+    def get_target_filename_abs(self, target: T.Union[build.Target, build.CustomTargetIndex]) -> str:
         return os.path.join(self.environment.get_build_dir(), self.get_target_filename(target))
 
     def get_base_options_for_target(self, target: build.BuildTarget) -> OptionOverrideProxy:
@@ -309,7 +313,7 @@ class Backend:
         raise AssertionError(f'BUG: Tried to link to {target!r} which is not linkable')
 
     @lru_cache(maxsize=None)
-    def get_target_dir(self, target):
+    def get_target_dir(self, target: build.Target) -> str:
         if self.environment.coredata.get_option(OptionKey('layout')) == 'mirror':
             dirname = target.get_subdir()
         else:
@@ -329,7 +333,7 @@ class Backend:
             return os.path.join(self.build_to_src, target_dir)
         return self.build_to_src
 
-    def get_target_private_dir(self, target):
+    def get_target_private_dir(self, target: build.Target) -> str:
         return os.path.join(self.get_target_filename(target, warn_multi_output=False) + '.p')
 
     def get_target_private_dir_abs(self, target):
@@ -371,7 +375,7 @@ class Backend:
             if not os.path.exists(outfileabs_tmp_dir):
                 os.makedirs(outfileabs_tmp_dir)
             result.append(unity_src)
-            return open(outfileabs_tmp, 'w')
+            return open(outfileabs_tmp, 'w', encoding='utf-8')
 
         # For each language, generate unity source files and return the list
         for comp, srcs in compsrcs.items():
@@ -409,7 +413,14 @@ class Backend:
                                  self.build_to_src, target.get_subdir(), obj)
                 obj_list.append(o)
             elif isinstance(obj, mesonlib.File):
-                obj_list.append(obj.rel_to_builddir(self.build_to_src))
+                if obj.is_built:
+                    o = os.path.join(proj_dir_to_build_root,
+                                     obj.rel_to_builddir(self.build_to_src))
+                    obj_list.append(o)
+                else:
+                    o = os.path.join(proj_dir_to_build_root,
+                                     self.build_to_src)
+                    obj_list.append(obj.rel_to_builddir(o))
             elif isinstance(obj, build.ExtractedObjects):
                 if obj.recursive:
                     obj_list += self._flatten_object_list(obj.target, obj.objlist, proj_dir_to_build_root)
@@ -431,7 +442,7 @@ class Backend:
         return result
 
     def get_executable_serialisation(self, cmd, workdir=None,
-                                     extra_bdeps=None, capture=None,
+                                     extra_bdeps=None, capture=None, feed=None,
                                      env: T.Optional[build.EnvironmentVariables] = None):
         exe = cmd[0]
         cmd_args = cmd[1:]
@@ -479,17 +490,18 @@ class Backend:
         workdir = workdir or self.environment.get_build_dir()
         return ExecutableSerialisation(exe_cmd + cmd_args, env,
                                        exe_wrapper, workdir,
-                                       extra_paths, capture)
+                                       extra_paths, capture, feed)
 
     def as_meson_exe_cmdline(self, tname, exe, cmd_args, workdir=None,
-                             extra_bdeps=None, capture=None, force_serialize=False,
+                             extra_bdeps=None, capture=None, feed=None,
+                             force_serialize=False,
                              env: T.Optional[build.EnvironmentVariables] = None,
                              verbose: bool = False):
         '''
         Serialize an executable for running with a generator or a custom target
         '''
         cmd = [exe] + cmd_args
-        es = self.get_executable_serialisation(cmd, workdir, extra_bdeps, capture, env)
+        es = self.get_executable_serialisation(cmd, workdir, extra_bdeps, capture, feed, env)
         es.verbose = verbose
         reasons = []
         if es.extra_paths:
@@ -511,12 +523,19 @@ class Backend:
 
         if capture:
             reasons.append('to capture output')
+        if feed:
+            reasons.append('to feed input')
 
         if not force_serialize:
-            if not capture:
+            if not capture and not feed:
                 return es.cmd_args, ''
+            args = []
+            if capture:
+                args += ['--capture', capture]
+            if feed:
+                args += ['--feed', feed]
             return ((self.environment.get_build_command() +
-                    ['--internal', 'exe', '--capture', capture, '--'] + es.cmd_args),
+                    ['--internal', 'exe'] + args + ['--'] + es.cmd_args),
                     ', '.join(reasons))
 
         if isinstance(exe, (programs.ExternalProgram,
@@ -528,10 +547,11 @@ class Backend:
             basename = os.path.basename(exe)
 
         # Can't just use exe.name here; it will likely be run more than once
-        # Take a digest of the cmd args, env, workdir, and capture. This avoids
-        # collisions and also makes the name deterministic over regenerations
-        # which avoids a rebuild by Ninja because the cmdline stays the same.
-        data = bytes(str(es.env) + str(es.cmd_args) + str(es.workdir) + str(capture),
+        # Take a digest of the cmd args, env, workdir, capture, and feed. This
+        # avoids collisions and also makes the name deterministic over
+        # regenerations which avoids a rebuild by Ninja because the cmdline
+        # stays the same.
+        data = bytes(str(es.env) + str(es.cmd_args) + str(es.workdir) + str(capture) + str(feed),
                      encoding='utf-8')
         digest = hashlib.sha1(data).hexdigest()
         scratch_file = f'meson_exe_{basename}_{digest}.dat'
@@ -755,7 +775,7 @@ class Backend:
 
         content = f'#include "{os.path.basename(pch_header)}"'
         pch_file_tmp = pch_file + '.tmp'
-        with open(pch_file_tmp, 'w') as f:
+        with open(pch_file_tmp, 'w', encoding='utf-8') as f:
             f.write(content)
         mesonlib.replace_if_different(pch_file, pch_file_tmp)
         return pch_rel_to_build
@@ -963,7 +983,7 @@ class Backend:
             depends = set(t.depends)
             if isinstance(exe, build.Target):
                 depends.add(exe)
-            for a in unholder(t.cmd_args):
+            for a in t.cmd_args:
                 if isinstance(a, build.Target):
                     depends.add(a)
                 if isinstance(a, build.BuildTarget):
@@ -1009,7 +1029,7 @@ class Backend:
         ifilename = os.path.join(self.environment.get_build_dir(), 'depmf.json')
         ofilename = os.path.join(self.environment.get_prefix(), self.build.dep_manifest_name)
         mfobj = {'type': 'dependency manifest', 'version': '1.0', 'projects': self.build.dep_manifest}
-        with open(ifilename, 'w') as f:
+        with open(ifilename, 'w', encoding='utf-8') as f:
             f.write(json.dumps(mfobj))
         # Copy file from, to, and with mode unchanged
         d.data.append(InstallDataBase(ifilename, ofilename, None, ''))
@@ -1091,10 +1111,10 @@ class Backend:
         # also be built by default. XXX: Sometime in the future these should be
         # built only before running tests.
         for t in self.build.get_tests():
-            exe = unholder(t.exe)
+            exe = t.exe
             if isinstance(exe, (build.CustomTarget, build.BuildTarget)):
                 result[exe.get_id()] = exe
-            for arg in unholder(t.cmd_args):
+            for arg in t.cmd_args:
                 if not isinstance(arg, (build.CustomTarget, build.BuildTarget)):
                     continue
                 result[arg.get_id()] = arg
@@ -1133,7 +1153,7 @@ class Backend:
         Returns the path to them relative to the build root directory.
         '''
         srcs = []
-        for i in unholder(target.get_sources()):
+        for i in target.get_sources():
             if isinstance(i, str):
                 fname = [os.path.join(self.build_to_src, target.subdir, i)]
             elif isinstance(i, build.BuildTarget):
@@ -1312,7 +1332,7 @@ class Backend:
                 mlog.warning('Cross file does not specify strip binary, result will not be stripped.')
             else:
                 # TODO go through all candidates, like others
-                strip_bin = [self.environment.default_strip[0]]
+                strip_bin = [detect.defaults['strip'][0]]
         d = InstallData(self.environment.get_source_dir(),
                         self.environment.get_build_dir(),
                         self.environment.get_prefix(),
@@ -1445,7 +1465,12 @@ class Backend:
         for h in headers:
             outdir = h.get_custom_install_dir()
             if outdir is None:
-                outdir = os.path.join(incroot, h.get_install_subdir())
+                subdir = h.get_install_subdir()
+                if subdir is None:
+                    outdir = incroot
+                else:
+                    outdir = os.path.join(incroot, subdir)
+
             for f in h.get_sources():
                 if not isinstance(f, File):
                     raise MesonException(f'Invalid header type {f!r} can\'t be installed')

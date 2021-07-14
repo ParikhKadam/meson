@@ -13,10 +13,11 @@
 # limitations under the License.
 
 from .. import mesonlib, mlog
-from .baseobjects import TV_func, TYPE_nvar
+from .baseobjects import TV_func, TYPE_var
 from .disabler import Disabler
 from .exceptions import InterpreterException, InvalidArguments
 from .helpers import check_stringlist, get_callee_args
+from ._unholder import _unholder
 
 from functools import wraps
 import abc
@@ -67,13 +68,24 @@ def noArgsFlattening(f: TV_func) -> TV_func:
     setattr(f, 'no-args-flattening', True)  # noqa: B010
     return f
 
+def noSecondLevelHolderResolving(f: TV_func) -> TV_func:
+    setattr(f, 'no-second-level-holder-flattening', True)  # noqa: B010
+    return f
+
+def permissive_unholder_return(f: TV_func) -> T.Callable[..., TYPE_var]:
+    @wraps(f)
+    def wrapped(*wrapped_args: T.Any, **wrapped_kwargs: T.Any) -> T.Any:
+        res = f(*wrapped_args, **wrapped_kwargs)
+        return _unholder(res, permissive=True)
+    return T.cast(T.Callable[..., TYPE_var], wrapped)
+
 def disablerIfNotFound(f: TV_func) -> TV_func:
     @wraps(f)
     def wrapped(*wrapped_args: T.Any, **wrapped_kwargs: T.Any) -> T.Any:
         kwargs = get_callee_args(wrapped_args)[3]
         disabler = kwargs.pop('disabler', False)
         ret = f(*wrapped_args, **wrapped_kwargs)
-        if disabler and not ret.held_object.found():
+        if disabler and not ret.found():
             return Disabler()
         return ret
     return T.cast(TV_func, wrapped)
@@ -264,6 +276,11 @@ class ContainerTypeInfo:
 
 _T = T.TypeVar('_T')
 
+class _NULL_T:
+    """Special null type for evolution, this is an implementation detail."""
+
+
+_NULL = _NULL_T()
 
 class KwargInfo(T.Generic[_T]):
 
@@ -292,8 +309,10 @@ class KwargInfo(T.Generic[_T]):
         validation, just converstion.
     :param deprecated_values: a dictionary mapping a value to the version of
         meson it was deprecated in.
-    :param since: a dictionary mapping a value to the version of meson it was
+    :param since_values: a dictionary mapping a value to the version of meson it was
         added in.
+    :param not_set_warning: A warning messsage that is logged if the kwarg is not
+        set by the user.
     """
 
     def __init__(self, name: str, types: T.Union[T.Type[_T], T.Tuple[T.Type[_T], ...], ContainerTypeInfo],
@@ -304,7 +323,8 @@ class KwargInfo(T.Generic[_T]):
                  deprecated: T.Optional[str] = None,
                  deprecated_values: T.Optional[T.Dict[str, str]] = None,
                  validator: T.Optional[T.Callable[[_T], T.Optional[str]]] = None,
-                 convertor: T.Optional[T.Callable[[_T], TYPE_nvar]] = None):
+                 convertor: T.Optional[T.Callable[[_T], TYPE_var]] = None,
+                 not_set_warning: T.Optional[str] = None):
         self.name = name
         self.types = types
         self.required = required
@@ -316,6 +336,43 @@ class KwargInfo(T.Generic[_T]):
         self.deprecated_values = deprecated_values
         self.validator = validator
         self.convertor = convertor
+        self.not_set_warning = not_set_warning
+
+    def evolve(self, *,
+               required: T.Union[bool, _NULL_T] = _NULL,
+               listify: T.Union[bool, _NULL_T] = _NULL,
+               default: T.Union[_T, None, _NULL_T] = _NULL,
+               since: T.Union[str, None, _NULL_T] = _NULL,
+               since_values: T.Union[T.Dict[str, str], None, _NULL_T] = _NULL,
+               deprecated: T.Union[str, None, _NULL_T] = _NULL,
+               deprecated_values: T.Union[T.Dict[str, str], None, _NULL_T] = _NULL,
+               validator: T.Union[T.Callable[[_T], T.Optional[str]], None, _NULL_T] = _NULL,
+               convertor: T.Union[T.Callable[[_T], TYPE_var], None, _NULL_T] = _NULL) -> 'KwargInfo':
+        """Create a shallow copy of this KwargInfo, with modifications.
+
+        This allows us to create a new copy of a KwargInfo with modifications.
+        This allows us to use a shared kwarg that implements complex logic, but
+        has slight differences in usage, such as being added to different
+        functions in different versions of Meson.
+
+        The use the _NULL special value here allows us to pass None, which has
+        meaning in many of these cases. _NULL itself is never stored, always
+        being replaced by either the copy in self, or the provided new version.
+        """
+        return type(self)(
+            self.name,
+            self.types,
+            listify=listify if not isinstance(listify, _NULL_T) else self.listify,
+            required=required if not isinstance(required, _NULL_T) else self.required,
+            default=default if not isinstance(default, _NULL_T) else self.default,
+            since=since if not isinstance(since, _NULL_T) else self.since,
+            since_values=since_values if not isinstance(since_values, _NULL_T) else self.since_values,
+            deprecated=deprecated if not isinstance(deprecated, _NULL_T) else self.deprecated,
+            deprecated_values=deprecated_values if not isinstance(deprecated_values, _NULL_T) else self.deprecated_values,
+            validator=validator if not isinstance(validator, _NULL_T) else self.validator,
+            convertor=convertor if not isinstance(convertor, _NULL_T) else self.convertor,
+        )
+
 
 
 def typed_kwargs(name: str, *types: KwargInfo) -> T.Callable[..., T.Any]:
@@ -410,6 +467,8 @@ def typed_kwargs(name: str, *types: KwargInfo) -> T.Callable[..., T.Any]:
                         kwargs[info.name] = info.types.container(info.default)
                     else:
                         kwargs[info.name] = info.default
+                    if info.not_set_warning:
+                        mlog.warning(info.not_set_warning)
 
                 if info.convertor:
                     kwargs[info.name] = info.convertor(kwargs[info.name])

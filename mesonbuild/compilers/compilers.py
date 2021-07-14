@@ -23,6 +23,7 @@ from .. import coredata
 from .. import mlog
 from .. import mesonlib
 from ..mesonlib import (
+    HoldableObject,
     EnvironmentException, MachineChoice, MesonException,
     Popen_safe, LibType, TemporaryDirectoryWinProof, OptionKey,
 )
@@ -72,6 +73,8 @@ c_suffixes = lang_suffixes['c'] + ('h',)  # type: T.Tuple[str, ...]
 # List of languages that by default consume and output libraries following the
 # C ABI; these can generally be used interchangeably
 clib_langs = ('objcpp', 'cpp', 'objc', 'c', 'fortran',)  # type: T.Tuple[str, ...]
+# List of assembler suffixes that can be linked with C code directly by the linker
+assembler_suffixes: T.Tuple[str, ...] = ('s', 'S')
 # List of languages that can be linked with C code directly by the linker
 # used in build.py:process_compilers() and build.py:get_dynamic_linker()
 clink_langs = ('d', 'cuda') + clib_langs  # type: T.Tuple[str, ...]
@@ -435,7 +438,7 @@ def get_base_link_args(options: 'KeyedOptionDictType', linker: 'Compiler',
 class CrossNoRunException(MesonException):
     pass
 
-class RunResult:
+class RunResult(HoldableObject):
     def __init__(self, compiled: bool, returncode: int = 999,
                  stdout: str = 'UNDEFINED', stderr: str = 'UNDEFINED'):
         self.compiled = compiled
@@ -444,7 +447,7 @@ class RunResult:
         self.stderr = stderr
 
 
-class CompileResult:
+class CompileResult(HoldableObject):
 
     """The result of Compiler.compiles (and friends)."""
 
@@ -467,7 +470,7 @@ class CompileResult:
         self.text_mode = text_mode
 
 
-class Compiler(metaclass=abc.ABCMeta):
+class Compiler(HoldableObject, metaclass=abc.ABCMeta):
     # Libraries to ignore in find_library() since they are provided by the
     # compiler or the C library. Currently only used for MSVC.
     ignore_libs = []  # type: T.List[str]
@@ -762,14 +765,14 @@ class Compiler(metaclass=abc.ABCMeta):
             if isinstance(code, str):
                 srcname = os.path.join(tmpdirname,
                                     'testfile.' + self.default_suffix)
-                with open(srcname, 'w') as ofile:
+                with open(srcname, 'w', encoding='utf-8') as ofile:
                     ofile.write(code)
                 # ccache would result in a cache miss
                 no_ccache = True
                 contents = code
             elif isinstance(code, mesonlib.File):
                 srcname = code.fname
-                with open(code.fname) as f:
+                with open(code.fname, encoding='utf-8') as f:
                     contents = f.read()
 
             # Construct the compiler command-line

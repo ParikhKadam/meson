@@ -18,6 +18,7 @@ import enum
 import sys
 import stat
 import time
+import abc
 import platform, subprocess, operator, os, shlex, shutil, re
 import collections
 from functools import lru_cache, wraps, total_ordering
@@ -46,12 +47,15 @@ __all__ = [
     'an_unpicklable_object',
     'python_command',
     'project_meson_versions',
+    'HoldableObject',
+    'SecondLevelHolder',
     'File',
     'FileMode',
     'GitException',
     'LibType',
     'MachineChoice',
     'MesonException',
+    'MesonBugException',
     'EnvironmentException',
     'FileOrString',
     'GitException',
@@ -128,11 +132,11 @@ __all__ = [
     'substitute_values',
     'substring_is_in_list',
     'typeslistify',
-    'unholder',
     'verbose_git',
     'version_compare',
     'version_compare_condition_with_min',
     'version_compare_many',
+    'search_version',
     'windows_proof_rm',
     'windows_proof_rmtree',
 ]
@@ -163,6 +167,14 @@ class MesonException(Exception):
         self.lineno = lineno
         self.colno = colno
 
+
+class MesonBugException(MesonException):
+    '''Exceptions thrown when there is a clear Meson bug that should be reported'''
+
+    def __init__(self, msg: str, file: T.Optional[str] = None,
+                 lineno: T.Optional[int] = None, colno: T.Optional[int] = None):
+        super().__init__(msg + '\n\n    This is a Meson bug and should be reported!',
+                         file=file, lineno=lineno, colno=colno)
 
 class EnvironmentException(MesonException):
     '''Exceptions thrown while processing and creating the build environment'''
@@ -246,17 +258,29 @@ def check_direntry_issues(direntry_array: T.Union[T.List[T.Union[str, bytes]], s
         for de in direntry_array:
             if is_ascii_string(de):
                 continue
-            mlog.warning(textwrap.dedent('''
-                You are using {!r} which is not a Unicode-compatible
-                locale but you are trying to access a file system entry called {!r} which is
+            mlog.warning(textwrap.dedent(f'''
+                You are using {e!r} which is not a Unicode-compatible
+                locale but you are trying to access a file system entry called {de!r} which is
                 not pure ASCII. This may cause problems.
-                '''.format(e, de)), file=sys.stderr)
+                '''), file=sys.stderr)
 
 
 # Put this in objects that should not get dumped to pickle files
 # by accident.
 import threading
 an_unpicklable_object = threading.Lock()
+
+class HoldableObject(metaclass=abc.ABCMeta):
+    ''' Dummy base class for all objects that can be
+        held by an interpreter.baseobjects.ObjectHolder '''
+
+class SecondLevelHolder(HoldableObject, metaclass=abc.ABCMeta):
+    ''' A second level object holder. The primary purpose
+        of such objects is to hold multiple objects with one
+        default option. '''
+
+    @abc.abstractmethod
+    def get_default_object(self) -> HoldableObject: ...
 
 class FileMode:
     # The first triad is for owner permissions, the second for group permissions,
@@ -284,8 +308,8 @@ class FileMode:
                                       '[r-][w-][xsS-]' # Group perms
                                       '[r-][w-][xtT-]') # Others perms
 
-    def __init__(self, perms: T.Optional[str] = None, owner: T.Optional[str] = None,
-                 group: T.Optional[str] = None):
+    def __init__(self, perms: T.Optional[str] = None, owner: T.Union[str, int, None] = None,
+                 group: T.Union[str, int, None] = None):
         self.perms_s = perms
         self.perms = self.perms_s_to_bits(perms)
         self.owner = owner
@@ -306,11 +330,9 @@ class FileMode:
             return -1
         eg = 'rwxr-xr-x'
         if not isinstance(perms_s, str):
-            msg = 'Install perms must be a string. For example, {!r}'
-            raise MesonException(msg.format(eg))
+            raise MesonException(f'Install perms must be a string. For example, {eg!r}')
         if len(perms_s) != 9 or not cls.symbolic_perms_regex.match(perms_s):
-            msg = 'File perms {!r} must be exactly 9 chars. For example, {!r}'
-            raise MesonException(msg.format(perms_s, eg))
+            raise MesonException(f'File perms {perms_s!r} must be exactly 9 chars. For example, {eg!r}')
         perms = 0
         # Owner perms
         if perms_s[0] == 'r':
@@ -357,7 +379,7 @@ dot_C_dot_H_warning = """You are using .C or .H files in your project. This is d
          Visual Studio compiler, as it treats .C files as C code, unless you add
          the /TP compiler flag, but this is unreliable.
          See https://github.com/mesonbuild/meson/pull/8747 for the discussions."""
-class File:
+class File(HoldableObject):
     def __init__(self, is_built: bool, subdir: str, fname: str):
         if fname.endswith(".C") or fname.endswith(".H"):
             mlog.warning(dot_C_dot_H_warning, once=True)
@@ -408,8 +430,11 @@ class File:
     def endswith(self, ending: str) -> bool:
         return self.fname.endswith(ending)
 
-    def split(self, s: str) -> T.List[str]:
-        return self.fname.split(s)
+    def split(self, s: str, maxsplit: int = -1) -> T.List[str]:
+        return self.fname.split(s, maxsplit=maxsplit)
+
+    def rsplit(self, s: str, maxsplit: int = -1) -> T.List[str]:
+        return self.fname.rsplit(s, maxsplit=maxsplit)
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, File):
@@ -866,6 +891,49 @@ def version_compare_condition_with_min(condition: str, minimum: str) -> bool:
 
     return T.cast(bool, cmpop(Version(minimum), Version(condition)))
 
+def search_version(text: str) -> str:
+    # Usually of the type 4.1.4 but compiler output may contain
+    # stuff like this:
+    # (Sourcery CodeBench Lite 2014.05-29) 4.8.3 20140320 (prerelease)
+    # Limiting major version number to two digits seems to work
+    # thus far. When we get to GCC 100, this will break, but
+    # if we are still relevant when that happens, it can be
+    # considered an achievement in itself.
+    #
+    # This regex is reaching magic levels. If it ever needs
+    # to be updated, do not complexify but convert to something
+    # saner instead.
+    # We'll demystify it a bit with a verbose definition.
+    version_regex = re.compile(r"""
+    (?<!                # Zero-width negative lookbehind assertion
+        (
+            \d          # One digit
+            | \.        # Or one period
+        )               # One occurrence
+    )
+    # Following pattern must not follow a digit or period
+    (
+        \d{1,2}         # One or two digits
+        (
+            \.\d+       # Period and one or more digits
+        )+              # One or more occurrences
+        (
+            -[a-zA-Z0-9]+   # Hyphen and one or more alphanumeric
+        )?              # Zero or one occurrence
+    )                   # One occurrence
+    """, re.VERBOSE)
+    match = version_regex.search(text)
+    if match:
+        return match.group(0)
+
+    # try a simpler regex that has like "blah 2020.01.100 foo" or "blah 2020.01 foo"
+    version_regex = re.compile(r"(\d{1,4}\.\d{1,4}\.?\d{0,4})")
+    match = version_regex.search(text)
+    if match:
+        return match.group(0)
+
+    return 'unknown version'
+
 
 def default_libdir() -> str:
     if is_debianlike():
@@ -1056,9 +1124,9 @@ def do_replacement(regex: T.Pattern[str], line: str, variable_format: str,
                 elif isinstance(var, int):
                     var_str = str(var)
                 else:
-                    msg = 'Tried to replace variable {!r} value with ' \
-                          'something other than a string or int: {!r}'
-                    raise MesonException(msg.format(varname, var))
+                    msg = f'Tried to replace variable {varname!r} value with ' \
+                          f'something other than a string or int: {var!r}'
+                    raise MesonException(msg)
             else:
                 missing_variables.add(varname)
             return var_str
@@ -1157,7 +1225,7 @@ def do_conf_file(src: str, dst: str, confdata: 'ConfigurationData', variable_for
         with open(src, encoding=encoding, newline='') as f:
             data = f.readlines()
     except Exception as e:
-        raise MesonException('Could not read input file {}: {}'.format(src, str(e)))
+        raise MesonException(f'Could not read input file {src}: {e!s}')
 
     (result, missing_variables, confdata_useless) = do_conf_str(src, data, confdata, variable_format, encoding)
     dst_tmp = dst + '~'
@@ -1165,7 +1233,7 @@ def do_conf_file(src: str, dst: str, confdata: 'ConfigurationData', variable_for
         with open(dst_tmp, 'w', encoding=encoding, newline='') as f:
             f.writelines(result)
     except Exception as e:
-        raise MesonException('Could not write output file {}: {}'.format(dst, str(e)))
+        raise MesonException(f'Could not write output file {dst}: {e!s}')
     shutil.copymode(src, dst_tmp)
     replace_if_different(dst, dst_tmp)
     return missing_variables, confdata_useless
@@ -1231,26 +1299,6 @@ def replace_if_different(dst: str, dst_tmp: str) -> None:
         os.unlink(dst_tmp)
 
 
-@T.overload
-def unholder(item: 'ObjectHolder[_T]') -> _T: ...
-
-@T.overload
-def unholder(item: T.List['ObjectHolder[_T]']) -> T.List[_T]: ...
-
-@T.overload
-def unholder(item: T.List[_T]) -> T.List[_T]: ...
-
-@T.overload
-def unholder(item: T.List[T.Union[_T, 'ObjectHolder[_T]']]) -> T.List[_T]: ...
-
-def unholder(item):  # type: ignore  # TODO fix overload (somehow)
-    """Get the held item of an object holder or list of object holders."""
-    if isinstance(item, list):
-        return [i.held_object if hasattr(i, 'held_object') else i for i in item]
-    if hasattr(item, 'held_object'):
-        return item.held_object
-    return item
-
 
 def listify(item: T.Any, flatten: bool = True) -> T.List[T.Any]:
     '''
@@ -1309,7 +1357,7 @@ def expand_arguments(args: T.Iterable[str]) -> T.Optional[T.List[str]]:
 
         args_file = arg[1:]
         try:
-            with open(args_file) as f:
+            with open(args_file, encoding='utf-8') as f:
                 extended_args = f.read().split()
             expended_args += extended_args
         except Exception as e:
@@ -1401,15 +1449,14 @@ def _substitute_values_check_errors(command: T.List[str], values: T.Dict[str, st
         # Error out if any input-derived templates are present in the command
         match = iter_regexin_iter(inregex, command)
         if match:
-            m = 'Command cannot have {!r}, since no input files were specified'
-            raise MesonException(m.format(match))
+            raise MesonException(f'Command cannot have {match!r}, since no input files were specified')
     else:
         if len(values['@INPUT@']) > 1:
             # Error out if @PLAINNAME@ or @BASENAME@ is present in the command
             match = iter_regexin_iter(inregex[1:], command)
             if match:
-                raise MesonException('Command cannot have {!r} when there is '
-                                     'more than one input file'.format(match))
+                raise MesonException(f'Command cannot have {match!r} when there is '
+                                     'more than one input file')
         # Error out if an invalid @INPUTnn@ template was specified
         for each in command:
             if not isinstance(each, str):
@@ -1804,11 +1851,11 @@ def get_wine_shortpath(winecmd: T.List[str], wine_paths: T.Sequence[str]) -> str
     wine_paths = list(OrderedSet(wine_paths))
 
     getShortPathScript = '%s.bat' % str(uuid.uuid4()).lower()[:5]
-    with open(getShortPathScript, mode='w') as f:
+    with open(getShortPathScript, mode='w', encoding='utf-8') as f:
         f.write("@ECHO OFF\nfor %%x in (%*) do (\n echo|set /p=;%~sx\n)\n")
         f.flush()
     try:
-        with open(os.devnull, 'w') as stderr:
+        with open(os.devnull, 'w', encoding='utf-8') as stderr:
             wine_path = subprocess.check_output(
                 winecmd +
                 ['cmd', '/C', getShortPathScript] + wine_paths,

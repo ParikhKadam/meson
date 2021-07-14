@@ -49,25 +49,27 @@ def create_hash(fname):
     hashname = fname + '.sha256sum'
     m = hashlib.sha256()
     m.update(open(fname, 'rb').read())
-    with open(hashname, 'w') as f:
+    with open(hashname, 'w', encoding='utf-8') as f:
         # A space and an asterisk because that is the format defined by GNU coreutils
         # and accepted by busybox and the Perl shasum tool.
         f.write('{} *{}\n'.format(m.hexdigest(), os.path.basename(fname)))
 
 
 def del_gitfiles(dirname):
+    gitfiles = ('.git', '.gitattributes', '.gitignore', '.gitmodules')
     for f in glob(os.path.join(dirname, '.git*')):
-        if os.path.isdir(f) and not os.path.islink(f):
-            windows_proof_rmtree(f)
-        else:
-            os.unlink(f)
+        if os.path.split(f)[1] in gitfiles:
+            if os.path.isdir(f) and not os.path.islink(f):
+                windows_proof_rmtree(f)
+            else:
+                os.unlink(f)
 
 def process_submodules(dirname):
     module_file = os.path.join(dirname, '.gitmodules')
     if not os.path.exists(module_file):
         return
     subprocess.check_call(['git', 'submodule', 'update', '--init', '--recursive'], cwd=dirname)
-    for line in open(module_file):
+    for line in open(module_file, encoding='utf-8'):
         line = line.strip()
         if '=' not in line:
             continue
@@ -242,7 +244,7 @@ def check_dist(packagename, meson_command, extra_meson_args, bld_root, privdir):
     unpacked_files = glob(os.path.join(unpackdir, '*'))
     assert(len(unpacked_files) == 1)
     unpacked_src_dir = unpacked_files[0]
-    with open(os.path.join(bld_root, 'meson-info', 'intro-buildoptions.json')) as boptions:
+    with open(os.path.join(bld_root, 'meson-info', 'intro-buildoptions.json'), encoding='utf-8') as boptions:
         meson_command += ['-D{name}={value}'.format(**o) for o in json.load(boptions)
                           if o['name'] not in ['backend', 'install_umask', 'buildtype']]
     meson_command += extra_meson_args

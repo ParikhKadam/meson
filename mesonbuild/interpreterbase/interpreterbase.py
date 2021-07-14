@@ -16,17 +16,19 @@
 # or an interpreter-based tool.
 
 from .. import mparser, mesonlib, mlog
-from .. import environment, dependencies
+from .. import environment
 
 from .baseobjects import (
     InterpreterObject,
+    MesonInterpreterObject,
     MutableInterpreterObject,
+    InterpreterObjectTypeVar,
     ObjectHolder,
     RangeHolder,
 
+    TYPE_elementary,
     TYPE_var,
-    TYPE_nvar,
-    TYPE_nkwargs,
+    TYPE_kwargs,
 )
 
 from .exceptions import (
@@ -40,26 +42,44 @@ from .exceptions import (
 
 from .decorators import FeatureNew, builtinMethodNoKwargs
 from .disabler import Disabler, is_disabled
-from .helpers import check_stringlist, default_resolve_key, flatten
+from .helpers import check_stringlist, default_resolve_key, flatten, resolve_second_level_holders
+from ._unholder import _unholder
 
 import os, copy, re
 import typing as T
 
+if T.TYPE_CHECKING:
+    from ..interpreter import Interpreter
+
+HolderMapType = T.Dict[
+    T.Type[mesonlib.HoldableObject],
+    # For some reason, this has to be a callable and can't just be ObjectHolder[InterpreterObjectTypeVar]
+    T.Callable[[InterpreterObjectTypeVar, 'Interpreter'], ObjectHolder[InterpreterObjectTypeVar]]
+]
+
+FunctionType = T.Dict[
+    str,
+    T.Callable[[mparser.BaseNode, T.List[TYPE_var], T.Dict[str, TYPE_var]], TYPE_var]
+]
 
 class MesonVersionString(str):
     pass
 
 class InterpreterBase:
-    elementary_types = (int, float, str, bool, list)
+    elementary_types = (int, str, bool, list)
 
     def __init__(self, source_root: str, subdir: str, subproject: str):
         self.source_root = source_root
-        self.funcs = {}    # type: T.Dict[str, T.Callable[[mparser.BaseNode, T.List[TYPE_nvar], T.Dict[str, TYPE_nvar]], TYPE_var]]
-        self.builtin = {}  # type: T.Dict[str, InterpreterObject]
+        self.funcs: FunctionType = {}
+        self.builtin: T.Dict[str, InterpreterObject] = {}
+        # Holder maps store a mapping from an HoldableObject to a class ObjectHolder
+        self.holder_map: HolderMapType = {}
+        self.bound_holder_map: HolderMapType = {}
         self.subdir = subdir
         self.root_subdir = subdir
         self.subproject = subproject
-        self.variables = {}  # type: T.Dict[str, TYPE_var]
+        # TODO: This should actually be more strict: T.Union[TYPE_elementary, InterpreterObject]
+        self.variables: T.Dict[str, T.Union[TYPE_var, InterpreterObject]] = {}
         self.argument_depth = 0
         self.current_lineno = -1
         # Current node set during a function call. This can be used as location
@@ -75,7 +95,7 @@ class InterpreterBase:
         mesonfile = os.path.join(self.source_root, self.subdir, environment.build_filename)
         if not os.path.isfile(mesonfile):
             raise InvalidArguments('Missing Meson file in %s' % mesonfile)
-        with open(mesonfile, encoding='utf8') as mf:
+        with open(mesonfile, encoding='utf-8') as mf:
             code = mf.read()
         if code.isspace():
             raise InvalidCode('Builder file is empty.')
@@ -137,7 +157,7 @@ class InterpreterBase:
                 raise e
             i += 1 # In THE FUTURE jump over blocks and stuff.
 
-    def evaluate_statement(self, cur: mparser.BaseNode) -> T.Optional[TYPE_var]:
+    def evaluate_statement(self, cur: mparser.BaseNode) -> T.Optional[T.Union[TYPE_var, InterpreterObject]]:
         self.current_node = cur
         if isinstance(cur, mparser.FunctionNode):
             return self.function_call(cur)
@@ -191,14 +211,14 @@ class InterpreterBase:
             raise InvalidCode("Unknown statement.")
         return None
 
-    def evaluate_arraystatement(self, cur: mparser.ArrayNode) -> list:
+    def evaluate_arraystatement(self, cur: mparser.ArrayNode) -> T.List[T.Union[TYPE_var, InterpreterObject]]:
         (arguments, kwargs) = self.reduce_arguments(cur.args)
         if len(kwargs) > 0:
             raise InvalidCode('Keyword arguments are invalid in array construction.')
         return arguments
 
     @FeatureNew('dict', '0.47.0')
-    def evaluate_dictstatement(self, cur: mparser.DictNode) -> TYPE_nkwargs:
+    def evaluate_dictstatement(self, cur: mparser.DictNode) -> T.Union[TYPE_var, InterpreterObject]:
         def resolve_key(key: mparser.BaseNode) -> str:
             if not isinstance(key, mparser.StringNode):
                 FeatureNew.single_use('Dictionary entry using non literal key', '0.53.0', self.subproject)
@@ -248,7 +268,7 @@ class InterpreterBase:
         return True
 
     def evaluate_in(self, val1: T.Any, val2: T.Any) -> bool:
-        if not isinstance(val1, (str, int, float, ObjectHolder)):
+        if not isinstance(val1, (str, int, float, mesonlib.HoldableObject)):
             raise InvalidArguments('lvalue of "in" operator must be a string, integer, float, or object')
         if not isinstance(val2, (list, dict)):
             raise InvalidArguments('rvalue of "in" operator must be an array or a dict')
@@ -261,6 +281,9 @@ class InterpreterBase:
         val2 = self.evaluate_statement(node.right)
         if isinstance(val2, Disabler):
             return val2
+        # Do not compare the ObjectHolders but the actual held objects
+        val1 = _unholder(val1)
+        val2 = _unholder(val2)
         if node.ctype == 'in':
             return self.evaluate_in(val1, val2)
         elif node.ctype == 'notin':
@@ -387,7 +410,7 @@ The result of this is undefined and will become a hard error in a future Meson r
         else:
             raise InvalidCode('You broke me.')
 
-    def evaluate_ternary(self, node: mparser.TernaryNode) -> TYPE_var:
+    def evaluate_ternary(self, node: mparser.TernaryNode) -> T.Union[TYPE_var, InterpreterObject]:
         assert(isinstance(node, mparser.TernaryNode))
         result = self.evaluate_statement(node.condition)
         if isinstance(result, Disabler):
@@ -479,7 +502,7 @@ The result of this is undefined and will become a hard error in a future Meson r
             raise InvalidArguments('The += operator currently only works with arrays, dicts, strings or ints')
         self.set_variable(varname, new_value)
 
-    def evaluate_indexing(self, node: mparser.IndexNode) -> TYPE_var:
+    def evaluate_indexing(self, node: mparser.IndexNode) -> T.Union[TYPE_elementary, InterpreterObject]:
         assert(isinstance(node, mparser.IndexNode))
         iobject = self.evaluate_statement(node.iobject)
         if isinstance(iobject, Disabler):
@@ -494,7 +517,7 @@ The result of this is undefined and will become a hard error in a future Meson r
                 raise InterpreterException('Key is not a string')
             try:
                 # The cast is required because we don't have recursive types...
-                return T.cast(TYPE_var, iobject[index])
+                return T.cast(T.Union[TYPE_elementary, InterpreterObject], iobject[index])
             except KeyError:
                 raise InterpreterException('Key %s is not in dict' % index)
         else:
@@ -504,35 +527,47 @@ The result of this is undefined and will become a hard error in a future Meson r
                 # Ignore the MyPy error, since we don't know all indexable types here
                 # and we handle non indexable types with an exception
                 # TODO maybe find a better solution
-                return iobject[index]  # type: ignore
+                res = iobject[index]  # type: ignore
+                # Only holderify if we are dealing with `InterpreterObject`, since raw
+                # lists already store ObjectHolders
+                if isinstance(iobject, InterpreterObject):
+                    return self._holderify(res)
+                else:
+                    return res
             except IndexError:
                 # We are already checking for the existence of __getitem__, so this should be save
                 raise InterpreterException('Index %d out of bounds of array of size %d.' % (index, len(iobject)))  # type: ignore
 
-    def function_call(self, node: mparser.FunctionNode) -> T.Optional[TYPE_var]:
+    def function_call(self, node: mparser.FunctionNode) -> T.Optional[T.Union[TYPE_elementary, InterpreterObject]]:
         func_name = node.func_name
-        (posargs, kwargs) = self.reduce_arguments(node.args)
+        (h_posargs, h_kwargs) = self.reduce_arguments(node.args)
+        (posargs, kwargs) = self._unholder_args(h_posargs, h_kwargs)
         if is_disabled(posargs, kwargs) and func_name not in {'get_variable', 'set_variable', 'is_disabler'}:
             return Disabler()
         if func_name in self.funcs:
             func = self.funcs[func_name]
-            func_args = posargs  # type: T.Any
+            func_args = posargs
             if not getattr(func, 'no-args-flattening', False):
                 func_args = flatten(posargs)
-            return func(node, func_args, kwargs)
+            if not getattr(func, 'no-second-level-holder-flattening', False):
+                func_args, kwargs = resolve_second_level_holders(func_args, kwargs)
+            res = func(node, func_args, kwargs)
+            return self._holderify(res)
         else:
             self.unknown_function_called(func_name)
             return None
 
-    def method_call(self, node: mparser.MethodNode) -> TYPE_var:
+    def method_call(self, node: mparser.MethodNode) -> T.Optional[T.Union[TYPE_var, InterpreterObject]]:
         invokable = node.source_object
+        obj: T.Union[TYPE_var, InterpreterObject]
         if isinstance(invokable, mparser.IdNode):
             object_name = invokable.value
             obj = self.get_variable(object_name)
         else:
             obj = self.evaluate_statement(invokable)
         method_name = node.name
-        (args, kwargs) = self.reduce_arguments(node.args)
+        (h_args, h_kwargs) = self.reduce_arguments(node.args)
+        (args, kwargs) = self._unholder_args(h_args, h_kwargs)
         if is_disabled(args, kwargs):
             return Disabler()
         if isinstance(obj, str):
@@ -545,8 +580,6 @@ The result of this is undefined and will become a hard error in a future Meson r
             return self.array_method_call(obj, method_name, args, kwargs)
         if isinstance(obj, dict):
             return self.dict_method_call(obj, method_name, args, kwargs)
-        if isinstance(obj, mesonlib.File):
-            raise InvalidArguments('File object "%s" is not callable.' % obj)
         if not isinstance(obj, InterpreterObject):
             raise InvalidArguments('Variable "%s" is not callable.' % object_name)
         # Special case. This is the only thing you can do with a disabler
@@ -556,15 +589,48 @@ The result of this is undefined and will become a hard error in a future Meson r
                 return False
             else:
                 return Disabler()
+        # TODO: InterpreterBase **really** shouldn't be in charge of checking this
         if method_name == 'extract_objects':
             if not isinstance(obj, ObjectHolder):
-                raise InvalidArguments(f'Invalid operation "extract_objects" on variable "{object_name}"')
+                raise InvalidArguments(f'Invalid operation "extract_objects" on variable "{object_name}" of type {type(obj).__name__}')
             self.validate_extraction(obj.held_object)
         obj.current_node = node
-        return obj.method_call(method_name, args, kwargs)
+        return self._holderify(obj.method_call(method_name, args, kwargs))
+
+    def _holderify(self, res: T.Union[TYPE_var, InterpreterObject, None]) -> T.Union[TYPE_elementary, InterpreterObject]:
+        if res is None:
+            return None
+        if isinstance(res, (int, bool, str)):
+            return res
+        elif isinstance(res, list):
+            return [self._holderify(x) for x in res]
+        elif isinstance(res, dict):
+            return {k: self._holderify(v) for k, v in res.items()}
+        elif isinstance(res, mesonlib.HoldableObject):
+            # Always check for an exact match first.
+            cls = self.holder_map.get(type(res), None)
+            if cls is not None:
+                # Casts to Interpreter are required here since an assertion would
+                # not work for the `ast` module.
+                return cls(res, T.cast('Interpreter', self))
+            # Try the boundary types next.
+            for typ, cls in self.bound_holder_map.items():
+                if isinstance(res, typ):
+                    return cls(res, T.cast('Interpreter', self))
+            raise mesonlib.MesonBugException(f'Object {res} of type {type(res).__name__} is neither in self.holder_map nor self.bound_holder_map.')
+        elif isinstance(res, ObjectHolder):
+            raise mesonlib.MesonBugException(f'Returned object {res} of type {type(res).__name__} is an object holder.')
+        elif isinstance(res, MesonInterpreterObject):
+            return res
+        raise mesonlib.MesonBugException(f'Unknown returned object {res} of type {type(res).__name__} in the parameters.')
+
+    def _unholder_args(self,
+                       args: T.List[T.Union[TYPE_var, InterpreterObject]],
+                       kwargs: T.Dict[str, T.Union[TYPE_var, InterpreterObject]]) -> T.Tuple[T.List[TYPE_var], TYPE_kwargs]:
+        return [_unholder(x) for x in args], {k: _unholder(v) for k, v in kwargs.items()}
 
     @builtinMethodNoKwargs
-    def bool_method_call(self, obj: bool, method_name: str, posargs: T.List[TYPE_nvar], kwargs: T.Dict[str, T.Any]) -> T.Union[str, int]:
+    def bool_method_call(self, obj: bool, method_name: str, posargs: T.List[TYPE_var], kwargs: TYPE_kwargs) -> T.Union[str, int]:
         if method_name == 'to_string':
             if not posargs:
                 if obj:
@@ -587,7 +653,7 @@ The result of this is undefined and will become a hard error in a future Meson r
             raise InterpreterException('Unknown method "%s" for a boolean.' % method_name)
 
     @builtinMethodNoKwargs
-    def int_method_call(self, obj: int, method_name: str, posargs: T.List[TYPE_nvar], kwargs: T.Dict[str, T.Any]) -> T.Union[str, bool]:
+    def int_method_call(self, obj: int, method_name: str, posargs: T.List[TYPE_var], kwargs: TYPE_kwargs) -> T.Union[str, bool]:
         if method_name == 'is_even':
             if not posargs:
                 return obj % 2 == 0
@@ -607,20 +673,18 @@ The result of this is undefined and will become a hard error in a future Meson r
             raise InterpreterException('Unknown method "%s" for an integer.' % method_name)
 
     @staticmethod
-    def _get_one_string_posarg(posargs: T.List[TYPE_nvar], method_name: str) -> str:
+    def _get_one_string_posarg(posargs: T.List[TYPE_var], method_name: str) -> str:
         if len(posargs) > 1:
-            m = '{}() must have zero or one arguments'
-            raise InterpreterException(m.format(method_name))
+            raise InterpreterException(f'{method_name}() must have zero or one arguments')
         elif len(posargs) == 1:
             s = posargs[0]
             if not isinstance(s, str):
-                m = '{}() argument must be a string'
-                raise InterpreterException(m.format(method_name))
+                raise InterpreterException(f'{method_name}() argument must be a string')
             return s
         return None
 
     @builtinMethodNoKwargs
-    def string_method_call(self, obj: str, method_name: str, posargs: T.List[TYPE_nvar], kwargs: T.Dict[str, T.Any]) -> T.Union[str, int, bool, T.List[str]]:
+    def string_method_call(self, obj: str, method_name: str, posargs: T.List[TYPE_var], kwargs: TYPE_kwargs) -> T.Union[str, int, bool, T.List[str]]:
         if method_name == 'strip':
             s1 = self._get_one_string_posarg(posargs, 'strip')
             if s1 is not None:
@@ -692,7 +756,7 @@ The result of this is undefined and will become a hard error in a future Meson r
             return obj.replace(posargs[0], posargs[1])
         raise InterpreterException('Unknown method "%s" for a string.' % method_name)
 
-    def format_string(self, templ: str, args: T.List[TYPE_nvar]) -> str:
+    def format_string(self, templ: str, args: T.List[TYPE_var]) -> str:
         arg_strings = []
         for arg in args:
             if isinstance(arg, mparser.BaseNode):
@@ -713,7 +777,11 @@ The result of this is undefined and will become a hard error in a future Meson r
         raise InvalidCode('Unknown function "%s".' % func_name)
 
     @builtinMethodNoKwargs
-    def array_method_call(self, obj: T.List[TYPE_var], method_name: str, posargs: T.List[TYPE_nvar], kwargs: T.Dict[str, T.Any]) -> TYPE_var:
+    def array_method_call(self,
+                          obj: T.List[T.Union[TYPE_elementary, InterpreterObject]],
+                          method_name: str,
+                          posargs: T.List[TYPE_var],
+                          kwargs: TYPE_kwargs) -> T.Union[TYPE_var, InterpreterObject]:
         if method_name == 'contains':
             def check_contains(el: list) -> bool:
                 if len(posargs) != 1:
@@ -734,7 +802,7 @@ The result of this is undefined and will become a hard error in a future Meson r
             index = posargs[0]
             fallback = None
             if len(posargs) == 2:
-                fallback = posargs[1]
+                fallback = self._holderify(posargs[1])
             elif len(posargs) > 2:
                 m = 'Array method \'get()\' only takes two arguments: the ' \
                     'index and an optional fallback value if the index is ' \
@@ -750,11 +818,14 @@ The result of this is undefined and will become a hard error in a future Meson r
                     return self.evaluate_statement(fallback)
                 return fallback
             return obj[index]
-        m = 'Arrays do not have a method called {!r}.'
-        raise InterpreterException(m.format(method_name))
+        raise InterpreterException(f'Arrays do not have a method called {method_name!r}.')
 
     @builtinMethodNoKwargs
-    def dict_method_call(self, obj: T.Dict[str, TYPE_var], method_name: str, posargs: T.List[TYPE_nvar], kwargs: T.Dict[str, T.Any]) -> TYPE_var:
+    def dict_method_call(self,
+                         obj: T.Dict[str, T.Union[TYPE_elementary, InterpreterObject]],
+                         method_name: str,
+                         posargs: T.List[TYPE_var],
+                         kwargs: TYPE_kwargs) -> T.Union[TYPE_var, InterpreterObject]:
         if method_name in ('has_key', 'get'):
             if method_name == 'has_key':
                 if len(posargs) != 1:
@@ -776,7 +847,7 @@ The result of this is undefined and will become a hard error in a future Meson r
                 return obj[key]
 
             if len(posargs) == 2:
-                fallback = posargs[1]
+                fallback = self._holderify(posargs[1])
                 if isinstance(fallback, mparser.BaseNode):
                     return self.evaluate_statement(fallback)
                 return fallback
@@ -795,18 +866,20 @@ The result of this is undefined and will become a hard error in a future Meson r
                 args: mparser.ArgumentNode,
                 key_resolver: T.Callable[[mparser.BaseNode], str] = default_resolve_key,
                 duplicate_key_error: T.Optional[str] = None,
-            ) -> T.Tuple[T.List[TYPE_nvar], TYPE_nkwargs]:
+            ) -> T.Tuple[
+                T.List[T.Union[TYPE_var, InterpreterObject]],
+                T.Dict[str, T.Union[TYPE_var, InterpreterObject]]
+            ]:
         assert(isinstance(args, mparser.ArgumentNode))
         if args.incorrect_order():
             raise InvalidArguments('All keyword arguments must be after positional arguments.')
         self.argument_depth += 1
-        reduced_pos = [self.evaluate_statement(arg) for arg in args.arguments]  # type: T.List[TYPE_nvar]
-        reduced_kw = {}  # type: TYPE_nkwargs
+        reduced_pos: T.List[T.Union[TYPE_var, InterpreterObject]] = [self.evaluate_statement(arg) for arg in args.arguments]
+        reduced_kw: T.Dict[str, T.Union[TYPE_var, InterpreterObject]] = {}
         for key, val in args.kwargs.items():
             reduced_key = key_resolver(key)
-            reduced_val = val  # type: TYPE_nvar
-            if isinstance(reduced_val, mparser.BaseNode):
-                reduced_val = self.evaluate_statement(reduced_val)
+            assert isinstance(val, mparser.BaseNode)
+            reduced_val = self.evaluate_statement(val)
             if duplicate_key_error and reduced_key in reduced_kw:
                 raise InvalidArguments(duplicate_key_error.format(reduced_key))
             reduced_kw[reduced_key] = reduced_val
@@ -814,7 +887,7 @@ The result of this is undefined and will become a hard error in a future Meson r
         final_kw = self.expand_default_kwargs(reduced_kw)
         return reduced_pos, final_kw
 
-    def expand_default_kwargs(self, kwargs: TYPE_nkwargs) -> TYPE_nkwargs:
+    def expand_default_kwargs(self, kwargs: T.Dict[str, T.Union[TYPE_var, InterpreterObject]]) -> T.Dict[str, T.Union[TYPE_var, InterpreterObject]]:
         if 'kwargs' not in kwargs:
             return kwargs
         to_expand = kwargs.pop('kwargs')
@@ -838,27 +911,41 @@ To specify a keyword argument, use : instead of =.''')
             raise InvalidArguments('Tried to assign value to a non-variable.')
         value = self.evaluate_statement(node.value)
         if not self.is_assignable(value):
-            raise InvalidCode('Tried to assign an invalid value to variable.')
+            raise InvalidCode(f'Tried to assign the invalid value "{value}" of type {type(value).__name__} to variable.')
         # For mutable objects we need to make a copy on assignment
         if isinstance(value, MutableInterpreterObject):
             value = copy.deepcopy(value)
         self.set_variable(var_name, value)
         return None
 
-    def set_variable(self, varname: str, variable: TYPE_var) -> None:
+    def set_variable(self, varname: str, variable: T.Union[TYPE_var, InterpreterObject], *, holderify: bool = False) -> None:
         if variable is None:
             raise InvalidCode('Can not assign None to variable.')
+        if holderify:
+            variable = self._holderify(variable)
+        else:
+            # Ensure that we are never storing a HoldableObject
+            def check(x: T.Union[TYPE_var, InterpreterObject]) -> None:
+                if isinstance(x, mesonlib.HoldableObject):
+                    raise mesonlib.MesonBugException(f'set_variable in InterpreterBase called with a HoldableObject {x} of type {type(x).__name__}')
+                elif isinstance(x, list):
+                    for y in x:
+                        check(y)
+                elif isinstance(x, dict):
+                    for v in x.values():
+                        check(v)
+            check(variable)
         if not isinstance(varname, str):
             raise InvalidCode('First argument to set_variable must be a string.')
         if not self.is_assignable(variable):
-            raise InvalidCode('Assigned value not of assignable type.')
+            raise InvalidCode(f'Assigned value "{variable}" of type {type(variable).__name__} is not an assignable type.')
         if re.match('[_a-zA-Z][_0-9a-zA-Z]*$', varname) is None:
             raise InvalidCode('Invalid variable name: ' + varname)
         if varname in self.builtin:
             raise InvalidCode('Tried to overwrite internal variable "%s"' % varname)
         self.variables[varname] = variable
 
-    def get_variable(self, varname: str) -> TYPE_var:
+    def get_variable(self, varname: str) -> T.Union[TYPE_var, InterpreterObject]:
         if varname in self.builtin:
             return self.builtin[varname]
         if varname in self.variables:
@@ -866,8 +953,7 @@ To specify a keyword argument, use : instead of =.''')
         raise InvalidCode('Unknown variable "%s".' % varname)
 
     def is_assignable(self, value: T.Any) -> bool:
-        return isinstance(value, (InterpreterObject, dependencies.Dependency,
-                                  str, int, list, dict, mesonlib.File))
+        return isinstance(value, (InterpreterObject, str, int, list, dict))
 
-    def validate_extraction(self, buildtarget: InterpreterObject) -> None:
+    def validate_extraction(self, buildtarget: mesonlib.HoldableObject) -> None:
         raise InterpreterException('validate_extraction is not implemented in this context (please file a bug)')

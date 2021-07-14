@@ -16,14 +16,16 @@
 # are UI-related.
 
 import os
+import typing as T
 
 from .. import build
-from ..mesonlib import unholder, relpath
-import typing as T
+from ..mesonlib import relpath, HoldableObject
+from ..interpreterbase.decorators import noKwargs, noPosargs
 
 if T.TYPE_CHECKING:
     from ..interpreter import Interpreter
-    from ..interpreterbase import TYPE_var, TYPE_nvar, TYPE_nkwargs
+    from ..interpreterbase import TYPE_var, TYPE_kwargs
+    from ..programs import ExternalProgram
 
 class ModuleState:
     """Object passed to all module methods.
@@ -59,15 +61,15 @@ class ModuleState:
         self.target_machine = interpreter.builtin['target_machine'].held_object
         self.current_node = interpreter.current_node
 
-    def get_include_args(self, include_dirs, prefix='-I'):
+    def get_include_args(self, include_dirs: T.Iterable[T.Union[str, build.IncludeDirs]], prefix: str = '-I') -> T.List[str]:
         if not include_dirs:
             return []
 
         srcdir = self.environment.get_source_dir()
         builddir = self.environment.get_build_dir()
 
-        dirs_str = []
-        for dirs in unholder(include_dirs):
+        dirs_str: T.List[str] = []
+        for dirs in include_dirs:
             if isinstance(dirs, str):
                 dirs_str += [f'{prefix}{dirs}']
                 continue
@@ -87,17 +89,23 @@ class ModuleState:
 
     def find_program(self, prog: T.Union[str, T.List[str]], required: bool = True,
                      version_func: T.Optional[T.Callable[['ExternalProgram'], str]] = None,
-                     wanted: T.Optional[str] = None) -> 'ExternalProgramHolder':
-        return self._interpreter.find_program_impl(prog, required=required)
+                     wanted: T.Optional[str] = None) -> 'ExternalProgram':
+        return self._interpreter.find_program_impl(prog, required=required, version_func=version_func, wanted=wanted)
 
-class ModuleObject:
+
+class ModuleObject(HoldableObject):
     """Base class for all objects returned by modules
     """
     def __init__(self) -> None:
-        self.methods = {}  # type: T.Dict[str, T.Callable[[ModuleState, T.List[TYPE_nvar], TYPE_nkwargs], T.Union[ModuleReturnValue, TYPE_var]]]
+        self.methods: T.Dict[
+            str,
+            T.Callable[[ModuleState, T.List['TYPE_var'], 'TYPE_kwargs'], T.Union[ModuleReturnValue, 'TYPE_var']]
+        ] = {}
+
 
 class MutableModuleObject(ModuleObject):
     pass
+
 
 # FIXME: Port all modules to stop using self.interpreter and use API on
 # ModuleState instead. Modules should stop using this class and instead use
@@ -106,6 +114,54 @@ class ExtensionModule(ModuleObject):
     def __init__(self, interpreter: 'Interpreter') -> None:
         super().__init__()
         self.interpreter = interpreter
+        self.methods.update({
+            'found': self.found_method,
+        })
+
+    @noPosargs
+    @noKwargs
+    def found_method(self, state: 'ModuleState', args: T.List['TYPE_var'], kwargs: 'TYPE_kwargs') -> bool:
+        return self.found()
+
+    @staticmethod
+    def found() -> bool:
+        return True
+
+
+class NewExtensionModule(ModuleObject):
+
+    """Class for modern modules
+
+    provides the found method.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.methods.update({
+            'found': self.found_method,
+        })
+
+    @noPosargs
+    @noKwargs
+    def found_method(self, state: 'ModuleState', args: T.List['TYPE_var'], kwargs: 'TYPE_kwargs') -> bool:
+        return self.found()
+
+    @staticmethod
+    def found() -> bool:
+        return True
+
+
+class NotFoundExtensionModule(NewExtensionModule):
+
+    """Class for modern modules
+
+    provides the found method.
+    """
+
+    @staticmethod
+    def found() -> bool:
+        return False
+
 
 def is_module_library(fname):
     '''

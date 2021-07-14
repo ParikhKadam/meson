@@ -11,7 +11,7 @@ for it. All the software on this list is tested for regressions before
 release, so it's highly recommended that projects add themselves
 here. Some additional projects are listed in the [`meson` GitHub
 topic](https://github.com/topics/meson).
- 
+
  - [2048.cpp](https://github.com/plibither8/2048.cpp), a fully featured terminal version of the game "2048" written in C++
  - [Aravis](https://github.com/AravisProject/aravis), a glib/gobject based library for video acquisition using Genicam cameras
  - [Akira](https://github.com/akiraux/Akira), a native Linux app for UI and UX design built in Vala and Gtk
@@ -21,8 +21,8 @@ topic](https://github.com/topics/meson).
  - [Budgie Desktop](https://github.com/budgie-desktop/budgie-desktop), a desktop environment built on GNOME technologies
  - [Bzip2](https://gitlab.com/federicomenaquintero/bzip2), the bzip2 compressor/decompressor
  - [Cage](https://github.com/Hjdskes/cage), a Wayland kiosk
+ - [canfigger](https://github.com/andy5995/canfigger), simple configuration file parser library
  - [casync](https://github.com/systemd/casync), Content-Addressable Data Synchronization Tool
- - [Chicken Libraries](https://github.com/chicken-libraries), Collection of C libraries. Data structures, algorithms, and more.
  - [cinnamon-desktop](https://github.com/linuxmint/cinnamon-desktop), the cinnamon desktop library
  - [Cozy](https://github.com/geigi/cozy), a modern audio book player for Linux and macOS using GTK+ 3
  - [dav1d](https://code.videolan.org/videolan/dav1d), an AV1 decoder
@@ -108,7 +108,7 @@ format files
  - [OTS](https://github.com/khaledhosny/ots), the OpenType Sanitizer, parses and serializes OpenType files (OTF, TTF) and WOFF and WOFF2 font files, validating and sanitizing them as it goes. Used by Chromium and Firefox
  - [Outlier](https://github.com/kerolasa/outlier), a small Hello World style Meson example project
  - [p11-kit](https://github.com/p11-glue/p11-kit), PKCS#11 module aggregator
- - [Pacman](https://git.archlinux.org/pacman.git/tree/), a package manager for Arch Linux
+ - [Pacman](https://gitlab.archlinux.org/pacman/pacman.git), a package manager for Arch Linux
  - [Pango](https://git.gnome.org/browse/pango/), an Internationalized text layout and rendering library
  - [Parzip](https://github.com/jpakkane/parzip), a multithreaded reimplementation of Zip
  - [Peek](https://github.com/phw/peek), simple animated GIF screen recorder with an easy to use interface
@@ -121,6 +121,7 @@ format files
  - [Polari](https://gitlab.gnome.org/GNOME/polari), an IRC client
  - [qboot](https://github.com/bonzini/qboot), a minimal x86 firmware for booting Linux kernels
  - [radare2](https://github.com/radare/radare2), unix-like reverse engineering framework and commandline tools (not the default)
+ - [rmw](https://remove-to-waste.info), safe-remove utility for the command line
  - [Rizin](https://rizin.re), Free and Open Source Reverse Engineering Framework
  - [QEMU](https://qemu.org), a processor emulator and virtualizer
  - [RxDock](https://gitlab.com/rxdock/rxdock), a protein-ligand docking software designed for high throughput virtual screening (fork of rDock)

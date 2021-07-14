@@ -12,22 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .. import mparser, mlog
+from .. import mesonlib, mparser, mlog
 from .exceptions import InvalidArguments, InterpreterException
 
 import collections.abc
 import typing as T
 
 if T.TYPE_CHECKING:
-    from .baseobjects import TYPE_nvar, TV_fw_args, TV_fw_kwargs
+    from .baseobjects import TYPE_var, TYPE_kwargs
 
-def flatten(args: T.Union['TYPE_nvar', T.List['TYPE_nvar']]) -> T.List['TYPE_nvar']:
+def flatten(args: T.Union['TYPE_var', T.List['TYPE_var']]) -> T.List['TYPE_var']:
     if isinstance(args, mparser.StringNode):
         assert isinstance(args.value, str)
         return [args.value]
     if not isinstance(args, collections.abc.Sequence):
         return [args]
-    result: T.List['TYPE_nvar'] = []
+    result: T.List['TYPE_var'] = []
     for a in args:
         if isinstance(a, list):
             rest = flatten(a)
@@ -37,6 +37,17 @@ def flatten(args: T.Union['TYPE_nvar', T.List['TYPE_nvar']]) -> T.List['TYPE_nva
         else:
             result.append(a)
     return result
+
+def resolve_second_level_holders(args: T.List['TYPE_var'], kwargs: 'TYPE_kwargs') -> T.Tuple[T.List['TYPE_var'], 'TYPE_kwargs']:
+    def resolver(arg: 'TYPE_var') -> 'TYPE_var':
+        if isinstance(arg, list):
+            return [resolver(x) for x in arg]
+        if isinstance(arg, dict):
+            return {k: resolver(v) for k, v in arg.items()}
+        if isinstance(arg, mesonlib.SecondLevelHolder):
+            return arg.get_default_object()
+        return arg
+    return [resolver(x) for x in args], {k: resolver(v) for k, v in kwargs.items()}
 
 def check_stringlist(a: T.Any, msg: str = 'Arguments must be strings.') -> None:
     if not isinstance(a, list):
@@ -51,7 +62,7 @@ def default_resolve_key(key: mparser.BaseNode) -> str:
         raise InterpreterException('Invalid kwargs format.')
     return key.value
 
-def get_callee_args(wrapped_args: T.Sequence[T.Any], want_subproject: bool = False) -> T.Tuple[T.Any, mparser.BaseNode, 'TV_fw_args', 'TV_fw_kwargs', T.Optional[str]]:
+def get_callee_args(wrapped_args: T.Sequence[T.Any], want_subproject: bool = False) -> T.Tuple[T.Any, mparser.BaseNode, T.List['TYPE_var'], 'TYPE_kwargs', T.Optional[str]]:
     s = wrapped_args[0]
     n = len(wrapped_args)
     # Raise an error if the codepaths are not there

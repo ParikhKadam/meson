@@ -18,11 +18,11 @@ import os
 import typing as T
 from pathlib import Path
 
-from .. import mlog
 from .. import mesonlib
+from .. import mlog
 from ..environment import detect_cpu_family
+from .base import DependencyException, SystemDependency
 
-from .base import (DependencyException, ExternalDependency)
 
 if T.TYPE_CHECKING:
     from ..environment import Environment
@@ -30,7 +30,7 @@ if T.TYPE_CHECKING:
 
 TV_ResultTuple = T.Tuple[T.Optional[str], T.Optional[str], bool]
 
-class CudaDependency(ExternalDependency):
+class CudaDependency(SystemDependency):
 
     supported_languages = ['cuda', 'cpp', 'c'] # see also _default_language
 
@@ -177,14 +177,14 @@ class CudaDependency(ExternalDependency):
             else:
                 mlog.warning(f'Could not detect CUDA Toolkit version for {path}')
         except Exception as e:
-            mlog.warning('Could not detect CUDA Toolkit version for {}: {}'.format(path, str(e)))
+            mlog.warning(f'Could not detect CUDA Toolkit version for {path}: {e!s}')
 
         return '0.0'
 
     def _read_cuda_runtime_api_version(self, path_str: str) -> T.Optional[str]:
         path = Path(path_str)
         for i in path.rglob('cuda_runtime_api.h'):
-            raw = i.read_text()
+            raw = i.read_text(encoding='utf-8')
             m = self.cudart_version_regex.search(raw)
             if not m:
                 continue
@@ -202,13 +202,13 @@ class CudaDependency(ExternalDependency):
         # Read 'version.txt' at the root of the CUDA Toolkit directory to determine the tookit version
         version_file_path = os.path.join(path, 'version.txt')
         try:
-            with open(version_file_path) as version_file:
+            with open(version_file_path, encoding='utf-8') as version_file:
                 version_str = version_file.readline() # e.g. 'CUDA Version 10.1.168'
                 m = self.toolkit_version_regex.match(version_str)
                 if m:
                     return self._strip_patch_version(m.group(1))
         except Exception as e:
-            mlog.debug('Could not read CUDA Toolkit\'s version file {}: {}'.format(version_file_path, str(e)))
+            mlog.debug(f'Could not read CUDA Toolkit\'s version file {version_file_path}: {e!s}')
 
         return None
 

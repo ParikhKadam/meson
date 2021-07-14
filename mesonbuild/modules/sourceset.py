@@ -14,15 +14,12 @@
 
 from collections import namedtuple
 from .. import mesonlib
+from .. import build
 from ..mesonlib import listify, OrderedSet
 from . import ExtensionModule, ModuleObject, MutableModuleObject
 from ..interpreterbase import (
     noPosargs, noKwargs, permittedKwargs,
     InterpreterException, InvalidArguments, InvalidCode, FeatureNew,
-)
-from ..interpreter import (
-    GeneratedListHolder, CustomTargetHolder,
-    CustomTargetIndexHolder
 )
 
 SourceSetRule = namedtuple('SourceSetRule', 'keys sources if_false sourcesets dependencies extra_deps')
@@ -49,8 +46,8 @@ class SourceSet(MutableModuleObject):
         deps = []
         for x in arg:
             if isinstance(x, (str, mesonlib.File,
-                              GeneratedListHolder, CustomTargetHolder,
-                              CustomTargetIndexHolder)):
+                              build.GeneratedList, build.CustomTarget,
+                              build.CustomTargetIndex)):
                 sources.append(x)
             elif hasattr(x, 'found'):
                 if not allow_deps:
@@ -101,7 +98,6 @@ class SourceSet(MutableModuleObject):
             if_true = args
         elif args:
             raise InterpreterException('add_all called with both positional and keyword arguments')
-        if_true = mesonlib.unholder(if_true)
         keys, dependencies = self.check_conditions(when)
         for s in if_true:
             if not isinstance(s, SourceSet):

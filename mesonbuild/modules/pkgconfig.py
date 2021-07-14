@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os, types
+import os
 from pathlib import PurePath
 
 from .. import build
@@ -75,7 +75,7 @@ class DependenciesHelper:
     def _process_reqs(self, reqs):
         '''Returns string names of requirements'''
         processed_reqs = []
-        for obj in mesonlib.unholder(mesonlib.listify(reqs)):
+        for obj in mesonlib.listify(reqs):
             if not isinstance(obj, str):
                 FeatureNew.single_use('pkgconfig.generate requirement from non-string object', '0.46.0', self.state.subproject)
             if hasattr(obj, 'generated_pc'):
@@ -108,13 +108,12 @@ class DependenciesHelper:
     def add_cflags(self, cflags):
         self.cflags += mesonlib.stringlistify(cflags)
 
-    def _process_libs(self, libs, public):
-        libs = mesonlib.unholder(mesonlib.listify(libs))
+    def _process_libs(self, libs, public: bool):
+        libs = mesonlib.listify(libs)
         processed_libs = []
         processed_reqs = []
         processed_cflags = []
         for obj in libs:
-            shared_library_only = getattr(obj, 'shared_library_only', False)
             if hasattr(obj, 'pcdep'):
                 pcdeps = mesonlib.listify(obj.pcdep)
                 for d in pcdeps:
@@ -136,7 +135,7 @@ class DependenciesHelper:
                 if obj.found():
                     processed_libs += obj.get_link_args()
                     processed_cflags += obj.get_compile_args()
-            elif isinstance(obj, build.SharedLibrary) and shared_library_only:
+            elif isinstance(obj, build.SharedLibrary) and obj.shared_library_only:
                 # Do not pull dependencies for shared libraries because they are
                 # only required for static linking. Adding private requires has
                 # the side effect of exposing their cflags, which is the
@@ -161,7 +160,7 @@ class DependenciesHelper:
             elif isinstance(obj, str):
                 processed_libs.append(obj)
             else:
-                raise mesonlib.MesonException('library argument not a string, library or dependency object.')
+                raise mesonlib.MesonException(f'library argument of type {type(obj).__name__} not a string, library or dependency object.')
 
         return processed_libs, processed_reqs, processed_cflags
 
@@ -330,9 +329,9 @@ class PkgConfigModule(ExtensionModule):
         except ValueError:
             return subdir.as_posix()
 
-    def generate_pkgconfig_file(self, state, deps, subdirs, name, description,
-                                url, version, pcfile, conflicts, variables,
-                                unescaped_variables, uninstalled=False, dataonly=False):
+    def _generate_pkgconfig_file(self, state, deps, subdirs, name, description,
+                                 url, version, pcfile, conflicts, variables,
+                                 unescaped_variables, uninstalled=False, dataonly=False):
         coredata = state.environment.get_coredata()
         if uninstalled:
             outdir = os.path.join(state.environment.build_dir, 'meson-uninstalled')
@@ -473,7 +472,7 @@ class PkgConfigModule(ExtensionModule):
             FeatureNew.single_use('pkgconfig.generate implicit version keyword', '0.46.0', state.subproject)
         elif len(args) == 1:
             FeatureNew.single_use('pkgconfig.generate optional positional argument', '0.46.0', state.subproject)
-            mainlib = getattr(args[0], 'held_object', args[0])
+            mainlib = args[0]
             if not isinstance(mainlib, (build.StaticLibrary, build.SharedLibrary)):
                 raise mesonlib.MesonException('Pkgconfig_gen first positional argument must be a library object')
             default_name = mainlib.name
@@ -556,7 +555,7 @@ class PkgConfigModule(ExtensionModule):
                 pkgroot = os.path.join(state.environment.coredata.get_option(mesonlib.OptionKey('libdir')), 'pkgconfig')
         if not isinstance(pkgroot, str):
             raise mesonlib.MesonException('Install_dir must be a string.')
-        self.generate_pkgconfig_file(state, deps, subdirs, name, description, url,
+        self._generate_pkgconfig_file(state, deps, subdirs, name, description, url,
                                      version, pcfile, conflicts, variables,
                                      unescaped_variables, False, dataonly)
         res = build.Data([mesonlib.File(True, state.environment.get_scratch_dir(), pcfile)], pkgroot, None, state.subproject)
@@ -566,7 +565,7 @@ class PkgConfigModule(ExtensionModule):
         unescaped_variables = parse_variable_list(unescaped_variables)
 
         pcfile = filebase + '-uninstalled.pc'
-        self.generate_pkgconfig_file(state, deps, subdirs, name, description, url,
+        self._generate_pkgconfig_file(state, deps, subdirs, name, description, url,
                                      version, pcfile, conflicts, variables,
                                      unescaped_variables, uninstalled=True, dataonly=dataonly)
         # Associate the main library with this generated pc file. If the library

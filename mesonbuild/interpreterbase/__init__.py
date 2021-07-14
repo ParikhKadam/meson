@@ -14,6 +14,7 @@
 
 __all__ = [
     'InterpreterObject',
+    'MesonInterpreterObject',
     'ObjectHolder',
     'RangeHolder',
     'MesonVersionString',
@@ -32,18 +33,22 @@ __all__ = [
     'check_stringlist',
     'default_resolve_key',
     'flatten',
+    'resolve_second_level_holders',
 
     'noPosargs',
     'builtinMethodNoKwargs',
     'noKwargs',
     'stringArgs',
     'noArgsFlattening',
+    'noSecondLevelHolderResolving',
+    'permissive_unholder_return',
     'disablerIfNotFound',
     'permittedKwargs',
     'typed_pos_args',
     'ContainerTypeInfo',
     'KwargInfo',
     'typed_kwargs',
+    'FeatureCheckBase',
     'FeatureNew',
     'FeatureDeprecated',
     'FeatureNewKwargs',
@@ -58,12 +63,14 @@ __all__ = [
     'TYPE_elementary',
     'TYPE_var',
     'TYPE_nvar',
+    'TYPE_kwargs',
     'TYPE_nkwargs',
     'TYPE_key_resolver',
 ]
 
 from .baseobjects import (
     InterpreterObject,
+    MesonInterpreterObject,
     ObjectHolder,
     RangeHolder,
     MutableInterpreterObject,
@@ -75,6 +82,7 @@ from .baseobjects import (
     TYPE_elementary,
     TYPE_var,
     TYPE_nvar,
+    TYPE_kwargs,
     TYPE_nkwargs,
     TYPE_key_resolver,
 )
@@ -85,12 +93,15 @@ from .decorators import (
     noKwargs,
     stringArgs,
     noArgsFlattening,
+    noSecondLevelHolderResolving,
+    permissive_unholder_return,
     disablerIfNotFound,
     permittedKwargs,
     typed_pos_args,
     ContainerTypeInfo,
     KwargInfo,
     typed_kwargs,
+    FeatureCheckBase,
     FeatureNew,
     FeatureDeprecated,
     FeatureNewKwargs,
@@ -107,5 +118,5 @@ from .exceptions import (
 )
 
 from .disabler import Disabler, is_disabled
-from .helpers import check_stringlist, default_resolve_key, flatten
+from .helpers import check_stringlist, default_resolve_key, flatten, resolve_second_level_holders
 from .interpreterbase import MesonVersionString, InterpreterBase
